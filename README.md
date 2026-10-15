@@ -61,6 +61,14 @@ python -m pytest -q
 
 Use `--platform cpu` on any script to force CPU.
 
+## Versions and GitHub
+
+Each delivered package bumps `__version__` in `g1_rl/__init__.py`. On your
+computer, `update_from_zip.sh g1_rl.zip` commits it as one commit tagged
+`v<version>` and pushes it. On Kaggle, the first notebook cell clones that tag
+(`GIT_REF = "v0.2.2"`) or `main`. Run outputs (`outputs/`, checkpoints) are
+git-ignored.
+
 ## Environment (Phase 1)
 
 | | |
