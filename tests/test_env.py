@@ -55,6 +55,11 @@ def test_reset(setup):
 
 def test_step_cases(setup):
   env, venv, s0 = setup
+  # VecEnv.step donates its input state (frees the buffers for reuse on GPU).
+  # Snapshot everything we compare against to host memory first, and give step
+  # its own copy so the shared fixture `s0` is not invalidated for other tests.
+  s0_host = jax.device_get(s0)
+  s0 = jax.tree.map(jnp.copy, s0)
   pk = env.packer
   d = jax.vmap(pk.unpack)(s0.data)
   # env 0: rotate the body 90 deg about x (lying on its side) -> tilt termination.
@@ -78,6 +83,6 @@ def test_step_cases(setup):
   assert out.info["cmd_timer"][3] >= env.cfg.command.resample_steps[0]
   np.testing.assert_allclose(out.info["command"][1], old_cmd[1])  # unchanged
   # Gait phase advanced by phase_dt on the normal env.
-  dphi = (out.info["phase"][1] - np.asarray(s0.info["phase"])[1] + np.pi) % (2 * np.pi) - np.pi
-  np.testing.assert_allclose(dphi, np.asarray(s0.info["phase_dt"])[1], atol=1e-5)
+  dphi = (out.info["phase"][1] - s0_host.info["phase"][1] + np.pi) % (2 * np.pi) - np.pi
+  np.testing.assert_allclose(dphi, s0_host.info["phase_dt"][1], atol=1e-5)
   assert np.isfinite(out.obs).all() and np.isfinite(out.reward).all()

@@ -29,12 +29,16 @@ class VecEnv:
     return self.reset_fn(self.keys(seed))
 
   def step(self, state, actions):
+    """One batched step. `state` is DONATED: its device buffers are reused for the
+    output, so never read the input state after this call (copy it first if needed).
+    (Donation is a no-op on CPU, so misuse only shows up on GPU.)"""
     return self.step_fn(state, actions)
 
   def make_rollout(self, policy_fn, length: int, record=lambda s: s.reward):
     """Jitted `length`-step rollout under `policy_fn(obs, key) -> action` (per env).
 
     Returns (final_state, per-step records stacked on axis 1, metrics summed over time).
+    The input state is donated (see `step`).
     `record(state)` picks what to keep per step (default: reward).
     """
     env = self.env
