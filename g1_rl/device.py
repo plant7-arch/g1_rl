@@ -60,8 +60,11 @@ def setup(platform: str = "auto", max_devices: int | None = None,
 
   import jax  # noqa: PLC0415  (import after env vars are set)
 
-  cache = compile_cache or os.environ.get(
-      "G1RL_COMPILE_CACHE", os.path.expanduser("~/.cache/g1_rl/jax"))
+  # On Kaggle, /kaggle/working persists between sessions (Persistence: Files),
+  # so the compiled-kernel cache survives and resumed runs skip most compiles.
+  default_cache = ("/kaggle/working/.jax_cache" if os.path.isdir("/kaggle/working")
+                   else os.path.expanduser("~/.cache/g1_rl/jax"))
+  cache = compile_cache or os.environ.get("G1RL_COMPILE_CACHE", default_cache)
   try:
     os.makedirs(cache, exist_ok=True)
     jax.config.update("jax_compilation_cache_dir", cache)
