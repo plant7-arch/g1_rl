@@ -1,7 +1,8 @@
 """G1 velocity-command walking environment (pure JAX / MJX).
 
 All methods operate on ONE environment; callers vmap them (see vec_env.py).
-`step` auto-resets: when an episode ends, the returned state already holds a
+Rewards are computed by g1_rl/rewards.py from a RewardInputs built in
+`_reward_terms`. `step` auto-resets: when an episode ends, the returned state already holds a
 fresh episode, while `reward`, `done`, `truncation` and `metrics` describe the
 step that just finished.
 
@@ -74,6 +75,8 @@ class G1Env:
     self._vadr = r.actuator_qvel_adr
     self._torque_limit = np.maximum(m.jnt_actfrcrange[m.actuator_trnid[:, 0], 1], 1.0).astype(np.float32)
     self._feet_site = r.feet_site_ids
+    self._rconsts = rewards.make_consts(r.actuator_names, self._home_u, self._lo, self._hi,
+                                        cfg.reward, self.dt)
     caps = np.array([[m.geom(n).id for n in foot] for foot in FOOT_CAPSULES], np.int32)
     self._foot_caps = caps  # (2, 3)
     self._cap_radius = m.geom_size[caps, 0].astype(np.float32)
@@ -181,15 +184,44 @@ class G1Env:
     }
     return d, info, ks[7]
 
-  def _reward_terms(self, d, d_prev, info, prev_info, action, contact, first_contact, fh, fell):
-    ctx = dict(env=self, d=d, d_prev=d_prev, info=info, prev_info=prev_info, action=action,
-               contact=contact, first_contact=first_contact, foot_heights=fh, fell=fell)
-    terms = rewards.compute(ctx, self.cfg)
-    return {k: jnp.where(jnp.isfinite(v), v, 0.0) for k, v in terms.items()}
+  def _reward_terms(self, d, d_prev, prev_info, phase, action, contact, first_contact,
+                    air_time, fh, fell):
+    """Build RewardInputs for one env and evaluate all reward terms."""
+    q, v = d.qpos, d.qvel
+    quat = q[3:7]
+    heading = gm.yaw_quat(gm.quat_to_yaw(quat))
+    feet = d.site_xpos[self._feet_site]
+    feet_prev = d_prev.site_xpos[self._feet_site]
+    rel = gm.quat_rotate_inverse(heading, feet[0] - feet[1])
+    inp = rewards.RewardInputs(
+        command=prev_info["command"],  # the command the action was chosen for
+        lin_vel=gm.quat_rotate_inverse(heading, v[0:3]),
+        ang_vel=v[3:6],
+        gravity=gm.quat_rotate_inverse(quat, jnp.array([0.0, 0.0, -1.0])),
+        base_height=q[2],
+        joint_pos=q[self._qadr],
+        joint_vel=v[self._vadr],
+        joint_vel_prev=d_prev.qvel[self._vadr],
+        torques=d.actuator_force,
+        action=action,
+        last_action=prev_info["last_act"],
+        foot_height=fh,
+        foot_vel_xy=(feet - feet_prev)[:, :2] / self.dt,
+        foot_up_z=d.site_xmat[self._feet_site][:, 2, 2],
+        contact=contact,
+        first_contact=first_contact,
+        air_time=air_time,
+        phase=phase,
+        feet_lateral_distance=jnp.abs(rel[1]),
+        fell=fell,
+    )
+    return rewards.compute(inp, self._rconsts, self.cfg.reward)
 
   @staticmethod
   def _metrics(terms, ep_return, ep_len, fell, done):
     m = {f"reward/{k}": v for k, v in terms.items()}
+    # fraction of steps where penalties outweigh rewards (sum clipped to 0)
+    m["debug/reward_clipped"] = (rewards.pre_clip(terms) < 0).astype(jnp.float32)
     m.update({"episode/return": ep_return * done, "episode/length": ep_len * done,
               "episode/fell": fell * done, "episode/count": done})
     return m
@@ -200,8 +232,9 @@ class G1Env:
     d, info, obs_rng = self._fresh_episode(d, rng)
     obs, priv = self._observe(d, info, obs_rng)
     zero = jnp.zeros(())
-    terms = self._reward_terms(d, d, info, info, jnp.zeros(self.nu), info["contact"],
-                               info["contact"] & False, self.foot_heights(d), jnp.array(False))
+    terms = self._reward_terms(d, d, info, info["phase"], jnp.zeros(self.nu), info["contact"],
+                               info["contact"] & False, info["feet_air_time"],
+                               self.foot_heights(d), jnp.array(False))
     metrics = self._metrics({k: zero for k in terms}, zero, zero, zero, zero)
     return State(self.packer.pack(d), obs, priv, zero, zero, zero, info, metrics)
 
@@ -218,8 +251,10 @@ class G1Env:
     # --- bookkeeping -------------------------------------------------------
     fh = self.foot_heights(d)
     contact = fh < cfg.contact_threshold
-    first_contact = (info["feet_air_time"] > 0) & contact
-    info["feet_air_time"] = (info["feet_air_time"] + self.dt) * ~contact
+    prev_air = info["feet_air_time"]
+    air_time = prev_air + self.dt  # time in the air including this step
+    first_contact = (prev_air > 0) & contact
+    info["feet_air_time"] = air_time * ~contact
     info["swing_peak"] = jnp.where(contact, 0.0, jnp.maximum(info["swing_peak"], fh))
     info["phase"] = gm.wrap_to_pi(info["phase"] + info["phase_dt"])
     info["step"] = info["step"] + 1
@@ -237,9 +272,9 @@ class G1Env:
     done = fell | timeout
 
     # --- reward --------------------------------------------------------------
-    terms = self._reward_terms(d, d_prev, info, state.info, action, contact, first_contact,
-                               fh, fell)
-    reward = rewards.total(terms, self.dt)
+    terms = self._reward_terms(d, d_prev, state.info, info["phase"], action, contact,
+                               first_contact, air_time, fh, fell)
+    reward = rewards.total(terms, cfg.reward)
 
     info["last_last_act"] = info["last_act"]
     info["last_act"] = action

@@ -52,11 +52,73 @@ class CommandConfig:
   resample_steps: tuple = (250, 500)  # resample every 5-10 s (at 50 Hz)
 
 
+def _default_weights():
+  # Every term is multiplied by its weight and by ctrl_dt (0.02 s), so a weight of
+  # 1.0 held for a whole 20 s episode adds 20 to the return. Positive = reward.
+  return {
+      # task
+      "tracking_lin_vel": 1.5,  # exp(-|v_xy_cmd - v_xy|^2 / sigma), heading frame
+      "tracking_ang_vel": 0.75,  # exp(-(wz_cmd - wz)^2 / sigma)
+      "alive": 0.25,
+      # gait shaping (uses the gait clock the policy observes)
+      "feet_phase": 1.0,  # swing-foot height follows the clock
+      "gait_contact": 0.5,  # stance/swing pattern matches the clock
+      "feet_air_time": 1.0,  # reward steps of a reasonable duration (on touchdown)
+      "feet_slip": -0.25,  # horizontal speed of feet in contact
+      "feet_flat": -2.0,  # tilted soles while in contact
+      "feet_distance": -10.0,  # feet closer than min_feet_distance (sideways)
+      # base stability
+      "lin_vel_z": -1.0,
+      "ang_vel_xy": -0.05,
+      "orientation": -2.0,  # gravity not straight down in the body frame
+      "base_height": -10.0,
+      # posture / regularisation
+      "pose": -0.5,  # weighted deviation from the home pose (per-joint weights below)
+      "stand_still": -0.2,  # joint deviation when the command is zero
+      "joint_limits": -5.0,
+      "joint_vel": -1e-3,
+      "joint_acc": -2.5e-7,
+      "torques": -1e-5,
+      "energy": -1e-4,  # |torque * joint velocity|
+      "action_rate": -0.05,
+      # applied after the positive clip
+      "termination": -50.0,
+  }
+
+
+def _default_pose_weights():
+  # Per-joint weight of (q - q_home)^2 in the "pose" term, by joint-name substring.
+  # Low = free to move (walking joints, arm swing); high = keep near home.
+  return {
+      "hip_pitch": 0.01, "knee": 0.01, "ankle_pitch": 0.05,
+      "hip_roll": 1.0, "hip_yaw": 1.0, "ankle_roll": 0.5,
+      "waist_yaw": 1.0, "waist_roll": 2.0, "waist_pitch": 2.0,
+      "shoulder_pitch": 0.1, "shoulder_roll": 1.0, "shoulder_yaw": 0.5,
+      "elbow": 0.1, "wrist": 1.0,
+  }
+
+
+@dataclasses.dataclass(frozen=True)
+class RewardConfig:
+  weights: dict = dataclasses.field(default_factory=_default_weights)
+  pose_weights: dict = dataclasses.field(default_factory=_default_pose_weights)
+  tracking_sigma: float = 0.25
+  base_height_target: float = 0.74  # m, pelvis; the bent-knee pose stands at ~0.74-0.75
+  swing_height: float = 0.08  # m, peak foot clearance commanded by the gait clock
+  feet_phase_sigma: float = 0.005
+  air_time_target: float = 0.3  # s; touchdowns after shorter swings are penalised
+  air_time_max_bonus: float = 0.2  # s; cap so the policy cannot farm long hops
+  min_feet_distance: float = 0.15  # m, lateral; feet stand 0.24 apart at home
+  soft_joint_limit: float = 0.95  # fraction of the joint range considered safe
+  only_positive: bool = True  # clip the per-step sum at 0 (before termination)
+
+
 @dataclasses.dataclass(frozen=True)
 class EnvConfig:
   sim: SimConfig = SimConfig()
   noise: NoiseConfig = NoiseConfig()
   command: CommandConfig = CommandConfig()
+  reward: RewardConfig = RewardConfig()
   episode_length: int = 1000  # control steps (20 s)
   action_scale: float = 0.5  # rad; target = home + scale * action, action in [-1, 1]
   gait_freq: tuple = (1.25, 1.5)  # Hz, sampled per episode
