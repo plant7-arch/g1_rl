@@ -1,0 +1,12 @@
+# Run outputs (checkpoints, logs, videos) live on Kaggle / locally, not in git
+outputs/
+.jax_cache/
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+# Local virtual environments
+.venv/
+venv/
