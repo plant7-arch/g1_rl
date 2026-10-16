@@ -249,9 +249,11 @@ class G1Env:
     info["dr_level"] = jnp.full_like(info["dr_level"], level)
     return state._replace(info=info)
 
-  def reset(self, rng) -> State:
+  def reset(self, rng, dr_level=None) -> State:
+    """New episode. `dr_level` (scalar) defaults to cfg.dr.level."""
+    level = self.cfg.dr.level if dr_level is None else dr_level
     d = sim.init_data(self.mx, jnp.asarray(self._home_q), jnp.asarray(self._home_u))
-    d, info, obs_rng = self._fresh_episode(d, rng, self.cfg.dr.level)
+    d, info, obs_rng = self._fresh_episode(d, rng, level)
     obs, priv = self._observe(d, info, obs_rng)
     zero = jnp.zeros(())
     terms = self._reward_terms(d, d, info, info["phase"], jnp.zeros(self.nu), info["contact"],

@@ -154,3 +154,58 @@ class EnvConfig:
   max_tilt_cos: float = 0.5  # terminate if body-up · world-up < this (tilt > 60 deg)
   contact_threshold: float = 1e-3  # foot-floor signed distance (m) counted as contact
 
+
+
+@dataclasses.dataclass(frozen=True)
+class PPOConfig:
+  # data per iteration = num_envs * unroll_length (8192 * 24 = 196,608 env steps)
+  num_envs: int = 8192
+  unroll_length: int = 24
+  total_env_steps: float = 250e6
+  # optimisation (rsl_rl-style; reference values used for legged robots)
+  num_epochs: int = 5
+  num_minibatches: int = 4
+  gamma: float = 0.99
+  gae_lambda: float = 0.95
+  clip_eps: float = 0.2
+  value_clip_eps: float = 0.2
+  value_coef: float = 1.0
+  entropy_coef: float = 0.005
+  max_grad_norm: float = 1.0
+  learning_rate: float = 1e-3  # initial; adapted per minibatch to keep KL near desired_kl
+  adaptive_lr: bool = True
+  desired_kl: float = 0.01
+  lr_bounds: tuple = (1e-5, 1e-2)
+  # networks
+  policy_hidden: tuple = (512, 256, 128)
+  value_hidden: tuple = (512, 256, 128)
+  activation: str = "elu"
+  init_std: float = 0.6
+  obs_clip: float = 10.0  # after normalisation
+  # domain-randomisation curriculum (level 0 = nominal robot, 1 = full ranges)
+  dr_level_start: float = 0.0
+  dr_level_step: float = 0.02  # added after each iteration that meets both criteria below
+  curriculum_tracking: float = 0.6  # tracking_lin_vel reward >= this fraction of its max
+  curriculum_survival_steps: float = 800.0  # falls rarer than once per this many env steps
+  # bookkeeping
+  seed: int = 0
+  log_every: int = 10  # console line every N iterations (metrics file gets every iteration)
+  ckpt_every: int = 50
+  keep_ckpts: int = 3
+
+  @property
+  def batch_size(self) -> int:
+    return self.num_envs * self.unroll_length
+
+  @property
+  def num_iterations(self) -> int:
+    return int(-(-self.total_env_steps // self.batch_size))
+
+
+PRESETS = {
+    # Full overnight run on Kaggle 2xT4 (~5.5-6 h for 250M steps).
+    "full": PPOConfig(),
+    # < 5 min check: tiny batch, a few iterations, frequent logs/checkpoints.
+    "smoke": PPOConfig(num_envs=1024, unroll_length=16, total_env_steps=10 * 1024 * 16,
+                       log_every=1, ckpt_every=5, dr_level_start=0.5),
+}

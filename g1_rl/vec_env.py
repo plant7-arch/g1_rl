@@ -8,6 +8,7 @@ of `env.reset` / `env.step`; this wrapper is for smoke tests and evaluation.
 from __future__ import annotations
 
 import jax
+import jax.numpy as jnp
 
 from g1_rl import parallel
 from g1_rl.env import G1Env
@@ -25,8 +26,11 @@ class VecEnv:
     """Per-env PRNG keys, already sharded (unsharded inputs would trigger a recompile)."""
     return parallel.put_batched(jax.random.split(jax.random.PRNGKey(seed), self.num_envs), self.mesh)
 
-  def reset(self, seed: int = 0):
-    return self.reset_fn(self.keys(seed))
+  def reset(self, seed: int = 0, dr_level=None):
+    """Batched reset. `dr_level` (scalar) defaults to the env config's level."""
+    level = self.env.cfg.dr.level if dr_level is None else dr_level
+    levels = parallel.put_batched(jnp.full((self.num_envs,), level, jnp.float32), self.mesh)
+    return self.reset_fn(self.keys(seed), levels)
 
   def step(self, state, actions):
     """One batched step. `state` is DONATED: its device buffers are reused for the

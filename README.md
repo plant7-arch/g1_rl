@@ -19,8 +19,8 @@ iteration for logging.
 | 1 | `G1Env` (reset/step/obs/termination, auto-reset, commands, gait clock) | **done** |
 | 2 | Rewards (22 terms, unit-tested, balance check in sim) | **done** |
 | 3 | Domain randomisation, action latency, pushes, curriculum level | **done** |
-| 4 | PPO training, checkpoints, resume, logging | next |
-| 5 | Evaluation (GPU MJX by default, CPU MuJoCo fallback + sim-to-sim) | |
+| 4 | PPO from scratch, multi-GPU train step, checkpoints/resume, policy export, logging, curriculum | **done** |
+| 5 | Evaluation (GPU MJX by default, CPU MuJoCo fallback + sim-to-sim) | next |
 | 6 | Export (portable `.npz` + ONNX) | |
 
 ## Layout
@@ -39,10 +39,20 @@ g1_rl/
   rewards.py       reward terms: pure functions of RewardInputs (unit-tested)
   randomize.py     per-episode physics randomisation, latency, pushes
   render.py        offscreen MuJoCo video from qpos trajectories
+  networks.py      MLPs + diagonal Gaussian policy (plain JAX)
+  optim.py         Adam + global-norm clipping
+  normalizer.py    running observation mean/variance
+  ppo.py           PPO: GAE, losses, device-local minibatches, adaptive LR, fused train step
+  trainer.py       training loop: resume, async metrics, checkpoints, time budget, video
+  checkpoint.py    portable .npz/.json checkpoints and policy export
+  policy.py        standalone loader to run an exported policy (GPU, CPU fallback)
+  logger.py        compact console line + metrics.jsonl
 scripts/
-  install_kaggle.sh  check_setup.py  benchmark.py  env_smoke.py  reward_check.py  dr_check.py  render_traj.py
+  install_kaggle.sh  check_setup.py  benchmark.py  env_smoke.py  reward_check.py  dr_check.py
+  train.py  plot_metrics.py  render_traj.py
 tests/             pytest suite (runs on GPU or CPU)
-notebooks/kaggle_train.ipynb
+notebooks/kaggle_train.ipynb      interactive checks (each cell < 5 min)
+notebooks/kaggle_overnight.ipynb  the overnight training run (Save & Run All)
 ```
 
 ## Quick start
@@ -131,6 +141,38 @@ values into this env's copy of the MJX model, so under vmap every robot is diffe
 `G1Env.set_dr_level(state, x)` changes it for all envs, effective at each env's next
 reset. Phase 4 uses it as a curriculum. The critic observes the sampled values; the
 policy does not and must be robust to them.
+
+## Training (Phase 4)
+
+```bash
+python scripts/train.py --preset smoke                       # < 5 min check
+python scripts/train.py --preset full --max-hours 11         # ~5.5-6 h on Kaggle 2xT4
+python scripts/train.py --preset full --resume outputs/runs/<run>   # continue
+python scripts/plot_metrics.py outputs/runs/<run> --show-terms
+```
+
+| | |
+|---|---|
+| Algorithm | PPO, asymmetric actor-critic (policy sees 100 obs, critic 205), GAE (γ 0.99, λ 0.95), clipped surrogate + clipped value loss, entropy 0.005, grad-norm 1.0 |
+| Batch | 8192 envs × 24 steps = 196,608 steps / iteration; 5 epochs × 4 minibatches; 1272 iterations = 250M steps |
+| Learning rate | Adam, 1e-3 initial, adapted every minibatch to keep KL ≈ 0.01 (rsl_rl rule) |
+| Networks | 512-256-128 ELU for both; learned state-independent action std (init 0.6) |
+| Normalisation | running mean/var of both observation vectors, clipped at ±10; the loss uses the statistics the rollout used, updated afterwards |
+| Multi-GPU | envs split across GPUs; minibatches drawn within each GPU's samples (no shuffling traffic); gradients all-reduced |
+| Curriculum | randomisation level starts at 0 and rises by 0.02 per iteration while velocity tracking ≥ 60 % of max and falls are rarer than 1 per 800 steps |
+| Time-outs | 20 s time limits bootstrap from V(s) (not treated as failures) |
+
+Outputs in `outputs/runs/<run>/`: `metrics.jsonl` (every iteration), `ckpt/` (last 3
+full states), `policy_latest.npz`/`policy_final.npz` (+ `.json`), `video_walk_forward.mp4`,
+`training_curves.png`, `config.json`, `summary.json`.
+
+**Running a trained policy on your own machine** (only jax + numpy needed):
+
+```python
+from g1_rl.policy import Policy
+pi = Policy.load("policy_final.npz")       # GPU if available, else CPU
+targets = pi.joint_targets(obs)             # obs: 100-vector, layout in policy_final.json
+```
 
 ## Design notes (Phase 0 findings)
 
