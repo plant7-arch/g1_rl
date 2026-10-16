@@ -20,21 +20,26 @@ class Logger:
   def __init__(self, run_dir: str, total_iters: int, batch_size: int, log_every: int,
                start_iter: int = 0):
     os.makedirs(run_dir, exist_ok=True)
+    self.clock = time.time
     self.path = os.path.join(run_dir, "metrics.jsonl")
     self.file = open(self.path, "a")
     self.total, self.batch, self.every = total_iters, batch_size, log_every
     self.start_iter = start_iter
     self.t0 = time.time()
-    self.t_last, self.it_last = None, None
+    self.t_ref, self.it_ref = None, None  # first logged iteration (after compile)
     self.sps = float("nan")
+    self.clock = time.time  # replaceable in tests
 
   def log(self, it: int, m: dict) -> None:
     """`it` = number of completed iterations (1-based)."""
-    now = time.time()
-    if self.t_last is not None and it > self.it_last:
-      inst = (it - self.it_last) * self.batch / (now - self.t_last)
-      self.sps = inst if not math.isfinite(self.sps) else 0.8 * self.sps + 0.2 * inst
-    self.t_last, self.it_last = now, it
+    now = self.clock()
+    # Average throughput since the first logged iteration. Per-interval rates are
+    # misleading here: metrics are fetched asynchronously and checkpoints add
+    # back-to-back log calls, so the gap between two calls is not one iteration.
+    if self.t_ref is None:
+      self.t_ref, self.it_ref = now, it
+    elif it > self.it_ref and now > self.t_ref:
+      self.sps = (it - self.it_ref) * self.batch / (now - self.t_ref)
     rec = {"iteration": it, "env_steps": it * self.batch, "wall_s": round(now - self.t0, 1),
            "sps": round(self.sps, 1) if math.isfinite(self.sps) else None}
     rec.update({k: (float(v) if math.isfinite(float(v)) else None) for k, v in m.items()})
