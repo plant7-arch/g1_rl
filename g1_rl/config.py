@@ -114,11 +114,34 @@ class RewardConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class DomainRandConfig:
+  """Per-episode physics randomisation, sampled at every reset.
+
+  Every range is scaled toward its nominal value by `level` in [0, 1]
+  (0 = the nominal robot, 1 = the full ranges below). The level lives in the env
+  state (info["dr_level"]) so the trainer can raise it as a curriculum.
+  """
+  level: float = 1.0  # initial level for reset()
+  friction: tuple = (0.4, 1.0)  # absolute sliding friction of every floor contact (nominal 1.0)
+  link_mass_scale: tuple = (0.9, 1.1)  # per body, inertia scaled with it
+  torso_payload: tuple = (-1.0, 3.0)  # kg added to torso_link (nominal 33 kg robot)
+  torso_com_offset: float = 0.03  # m, uniform per axis
+  kp_scale: tuple = (0.9, 1.1)  # per actuator
+  kd_scale: tuple = (0.8, 1.2)  # per actuator
+  frictionloss_scale: tuple = (0.5, 2.0)  # per joint (nominal 0.1 Nm)
+  armature_scale: tuple = (0.95, 1.05)  # per joint (motor reflected inertia)
+  latency_prob: float = 0.5  # chance an episode applies each action one control step late
+  push_interval: tuple = (5.0, 10.0)  # s between pushes
+  push_velocity: tuple = (0.1, 0.6)  # m/s, horizontal base velocity kick, random direction
+
+
+@dataclasses.dataclass(frozen=True)
 class EnvConfig:
   sim: SimConfig = SimConfig()
   noise: NoiseConfig = NoiseConfig()
   command: CommandConfig = CommandConfig()
   reward: RewardConfig = RewardConfig()
+  dr: DomainRandConfig = DomainRandConfig()
   episode_length: int = 1000  # control steps (20 s)
   action_scale: float = 0.5  # rad; target = home + scale * action, action in [-1, 1]
   gait_freq: tuple = (1.25, 1.5)  # Hz, sampled per episode

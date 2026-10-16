@@ -5,6 +5,10 @@ Each env in a batch of 4 is put in a different situation before a single step:
   env 1: untouched                                   -> normal step
   env 2: step counter at the time limit - 1          -> timeout (truncation)
   env 3: command timer about to expire               -> command resampled
+Randomisation cases folded into the same step:
+  env 0: dr_level set to 0 before it falls            -> new episode is the nominal robot
+  env 1: latency on, previous action set              -> motors get the previous action; pushed
+  env 3: latency off                                  -> motors get the current action
 """
 
 import jax
@@ -31,14 +35,14 @@ def setup():
 
 def test_layout(setup):
   env, _, _ = setup
-  assert env.obs_size == 100 and env.priv_obs_size == 139
+  assert env.obs_size == 100 and env.priv_obs_size == 205
   assert env.priv_layout["obs"] == slice(0, 100)
 
 
 def test_reset(setup):
   env, venv, s0 = setup
   s = jax.device_get(s0)
-  assert s.obs.shape == (N, 100) and s.priv_obs.shape == (N, 139)
+  assert s.obs.shape == (N, 100) and s.priv_obs.shape == (N, env.priv_obs_size)
   assert np.isfinite(s.obs).all() and np.isfinite(s.priv_obs).all()
   g = s.obs[:, env.obs_layout["gravity"]]
   assert (g[:, 2] < -0.9).all()  # upright (+ obs noise)
@@ -48,6 +52,9 @@ def test_reset(setup):
   cmd = s.info["command"]
   assert (cmd[:, 0] >= c.lin_vel_x[0]).all() and (cmd[:, 0] <= c.lin_vel_x[1]).all()
   assert (s.info["step"] == 0).all() and (s.done == 0).all()
+  # Default level 1: every env samples its own robot.
+  assert len(np.unique(s.info["dr"]["friction"])) == N
+  assert (s.info["dr_level"] == env.cfg.dr.level).all()
   # Same seed -> identical reset.
   s_again = jax.device_get(venv.reset(seed=0))
   np.testing.assert_array_equal(s.obs, s_again.obs)
@@ -69,6 +76,15 @@ def test_step_cases(setup):
   info["step"] = info["step"].at[2].set(env.cfg.episode_length - 1)
   info["cmd_timer"] = info["cmd_timer"].at[3].set(1)
   old_cmd = np.asarray(info["command"])
+  # randomisation cases
+  info["dr_level"] = info["dr_level"].at[0].set(0.0)
+  dr = dict(info["dr"])
+  dr["latency"] = dr["latency"].at[1].set(True).at[3].set(False)
+  info["dr"] = dr
+  prev_act = jnp.full(env.action_size, 0.4)
+  info["last_act"] = info["last_act"].at[1].set(prev_act)
+  info["push_timer"] = info["push_timer"].at[1].set(1).at[2].set(1000).at[3].set(1000)
+  kick1 = np.asarray(info["push_kick"][1])
   s = s0._replace(data=jax.vmap(pk.pack)(d), info=info)
   s = parallel.put_batched(s, RUNTIME.mesh)
   out = jax.device_get(venv.step(s, parallel.put_batched(jnp.zeros((N, env.action_size)), RUNTIME.mesh)))
@@ -86,3 +102,28 @@ def test_step_cases(setup):
   dphi = (out.info["phase"][1] - s0_host.info["phase"][1] + np.pi) % (2 * np.pi) - np.pi
   np.testing.assert_allclose(dphi, s0_host.info["phase_dt"][1], atol=1e-5)
   assert np.isfinite(out.obs).all() and np.isfinite(out.reward).all()
+
+  # --- randomisation --------------------------------------------------------
+  home, scale = env.robot.home_ctrl, env.cfg.action_scale
+  lo, hi = env.robot.ctrl_lo, env.robot.ctrl_hi
+  np.testing.assert_allclose(out.info["motor_targets"][1], np.clip(home + scale * 0.4, lo, hi),
+                             atol=1e-6)  # late episode: previous action applied
+  np.testing.assert_allclose(out.info["motor_targets"][3], np.clip(home, lo, hi),
+                             atol=1e-6)  # on-time episode: current (zero) action applied
+  assert out.metrics["debug/pushes"][1] == 1 and out.metrics["debug/pushes"][3] == 0
+  np.testing.assert_allclose(out.info["push_vel"][1], kick1, rtol=1e-5)
+  assert out.info["push_timer"][1] > 1  # next push scheduled
+  # env 0 fell with dr_level 0 -> its new episode is the nominal robot, level kept
+  assert out.info["dr_level"][0] == 0
+  assert out.info["dr"]["friction"][0] == pytest.approx(1.0)
+  np.testing.assert_allclose(out.info["dr"]["kp_scale"][0], 1.0, rtol=1e-6)
+  assert not out.info["dr"]["latency"][0]
+  # The critic sees the randomisation of the current episode.
+  priv_dr = out.priv_obs[:, env.priv_layout["dr"]]
+  np.testing.assert_allclose(priv_dr[:, 0], out.info["dr"]["friction"], rtol=1e-6)
+
+
+def test_set_dr_level(setup):
+  env, _, s0 = setup
+  s = env.set_dr_level(jax.device_get(s0), 0.3)
+  assert np.allclose(s.info["dr_level"], 0.3) and s.info["dr_level"].shape == (N,)

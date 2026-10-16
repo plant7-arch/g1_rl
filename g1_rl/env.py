@@ -13,7 +13,12 @@ Policy ("obs", what the real robot can sense; noisy):
   last_action(29) gait_phase cos/sin(4)                               = 100
 Critic ("priv_obs", simulator-only extras; noise-free):
   clean policy obs(100) base_lin_vel_body(3) base_height(1) foot_contact(2)
-  foot_height(2) foot_air_time(2) actuator_force/limit(29)            = 139
+  foot_height(2) foot_air_time(2) actuator_force/limit(29)
+  randomised robot: friction(1) payload(1) com_offset(3) kp_scale(29)
+  kd_scale(29) latency(1) recent_push(2)                              = 205
+
+Domain randomisation (randomize.py) is sampled per episode and stored in
+info["dr"]; info["dr_level"] in [0, 1] scales it (curriculum, see set_dr_level).
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ import numpy as np
 from mujoco import mjx
 
 from g1_rl import math as gm
-from g1_rl import rewards, robot, sim
+from g1_rl import randomize, rewards, robot, sim
 from g1_rl.config import EnvConfig
 
 FOOT_CAPSULES = (("left_foot1_collision", "left_foot2_collision", "left_foot3_collision"),
@@ -77,6 +82,7 @@ class G1Env:
     self._feet_site = r.feet_site_ids
     self._rconsts = rewards.make_consts(r.actuator_names, self._home_u, self._lo, self._hi,
                                         cfg.reward, self.dt)
+    self.dr = randomize.Randomizer(m, cfg.dr, r.torso_body_id, self.dt)
     caps = np.array([[m.geom(n).id for n in foot] for foot in FOOT_CAPSULES], np.int32)
     self._foot_caps = caps  # (2, 3)
     self._cap_radius = m.geom_size[caps, 0].astype(np.float32)
@@ -89,7 +95,7 @@ class G1Env:
     self.obs_size = self.obs_layout["_size"]
     self.priv_layout = _layout([("obs", self.obs_size), ("lin_vel", 3), ("height", 1),
                                 ("contact", 2), ("foot_height", 2), ("air_time", 2),
-                                ("act_force", nu)])
+                                ("act_force", nu), ("dr", self.dr.priv_size)])
     self.priv_obs_size = self.priv_layout["_size"]
 
   # ------------------------------------------------------------------ helpers
@@ -133,13 +139,14 @@ class G1Env:
     fh = self.foot_heights(d)
     priv = jnp.concatenate([
         clean, lin_vel, q[2:3], info["contact"].astype(jnp.float32), fh,
-        info["feet_air_time"], d.actuator_force / self._torque_limit])
+        info["feet_air_time"], d.actuator_force / self._torque_limit,
+        self.dr.privileged(info["dr"], info["push_vel"])])
     return jnp.nan_to_num(noisy), jnp.nan_to_num(priv)
 
-  def _fresh_episode(self, d, rng):
+  def _fresh_episode(self, d, rng, dr_level):
     """New initial configuration written into an existing Data (no full forward)."""
     cfg = self.cfg
-    ks = jax.random.split(rng, 8)
+    ks = jax.random.split(rng, 10)
     nu = self.nu
     q = jnp.asarray(self._home_q)
     xy = jax.random.uniform(ks[0], (2,), minval=-cfg.init_xy_range, maxval=cfg.init_xy_range)
@@ -181,7 +188,12 @@ class G1Env:
         "feet_air_time": jnp.zeros(2),
         "swing_peak": jnp.zeros(2),
         "ep_return": jnp.zeros(()),
+        # domain randomisation
+        "dr_level": jnp.asarray(dr_level, jnp.float32),
+        "dr": self.dr.sample(ks[8], dr_level),
+        "push_vel": jnp.zeros(2),  # last applied kick, decaying (critic only)
     }
+    info["push_timer"], info["push_kick"] = self.dr.sample_push(ks[9], dr_level)
     return d, info, ks[7]
 
   def _reward_terms(self, d, d_prev, prev_info, phase, action, contact, first_contact,
@@ -227,26 +239,52 @@ class G1Env:
     return m
 
   # ---------------------------------------------------------------- public API
+  @staticmethod
+  def set_dr_level(state: "State", level) -> "State":
+    """Return `state` with a new randomisation level for all envs (batched or not).
+
+    Takes effect for each env at its next reset (the current episode keeps its robot).
+    """
+    info = dict(state.info)
+    info["dr_level"] = jnp.full_like(info["dr_level"], level)
+    return state._replace(info=info)
+
   def reset(self, rng) -> State:
     d = sim.init_data(self.mx, jnp.asarray(self._home_q), jnp.asarray(self._home_u))
-    d, info, obs_rng = self._fresh_episode(d, rng)
+    d, info, obs_rng = self._fresh_episode(d, rng, self.cfg.dr.level)
     obs, priv = self._observe(d, info, obs_rng)
     zero = jnp.zeros(())
     terms = self._reward_terms(d, d, info, info["phase"], jnp.zeros(self.nu), info["contact"],
                                info["contact"] & False, info["feet_air_time"],
                                self.foot_heights(d), jnp.array(False))
     metrics = self._metrics({k: zero for k in terms}, zero, zero, zero, zero)
+    metrics["debug/dr_level"] = zero
+    metrics["debug/pushes"] = zero
     return State(self.packer.pack(d), obs, priv, zero, zero, zero, info, metrics)
 
   def step(self, state: State, action: jax.Array) -> State:
     cfg = self.cfg
     info = dict(state.info)
-    rng, k_obs, k_cmd, k_reset = jax.random.split(info["rng"], 4)
+    rng, k_obs, k_cmd, k_reset, k_push = jax.random.split(info["rng"], 5)
     d_prev = self.packer.unpack(state.data)
+    model = self.dr.apply(self.mx, info["dr"])  # this env's randomised robot
 
     action = jnp.clip(action, -1.0, 1.0)
-    targets = jnp.clip(self._home_u + cfg.action_scale * action, self._lo, self._hi)
-    d = sim.step_ctrl(self.mx, d_prev, targets, self.n_substeps)
+    # Latency: in "late" episodes the motors receive the previous action.
+    applied = jnp.where(info["dr"]["latency"], info["last_act"], action)
+    targets = jnp.clip(self._home_u + cfg.action_scale * applied, self._lo, self._hi)
+
+    # Push: an instantaneous horizontal base-velocity kick every few seconds.
+    info["push_timer"] = info["push_timer"] - 1
+    push = info["push_timer"] <= 0
+    kick = info["push_kick"] * push
+    d_push = d_prev.replace(qvel=d_prev.qvel.at[0:2].add(kick))
+    next_timer, next_kick = self.dr.sample_push(k_push, info["dr_level"])
+    info["push_timer"] = jnp.where(push, next_timer, info["push_timer"])
+    info["push_kick"] = jnp.where(push, next_kick, info["push_kick"])
+    info["push_vel"] = info["push_vel"] * 0.9 + kick
+
+    d = sim.step_ctrl(model, d_push, targets, self.n_substeps)
 
     # --- bookkeeping -------------------------------------------------------
     fh = self.foot_heights(d)
@@ -288,9 +326,11 @@ class G1Env:
     f_done = done.astype(jnp.float32)
     metrics = self._metrics(terms, info["ep_return"], info["step"].astype(jnp.float32),
                             fell.astype(jnp.float32), f_done)
+    metrics["debug/dr_level"] = info["dr_level"]
+    metrics["debug/pushes"] = push.astype(jnp.float32)
 
     # --- auto-reset ------------------------------------------------------------
-    d_new, info_new, k_obs2 = self._fresh_episode(d, k_reset)
+    d_new, info_new, k_obs2 = self._fresh_episode(d, k_reset, info["dr_level"])
     obs_new, priv_new = self._observe(d_new, info_new, k_obs2)
     d = sim.tree_where(done, d_new, d)
     info = sim.tree_where(done, info_new, info)

@@ -18,8 +18,8 @@ iteration for logging.
 | 0 | Environment setup, MJX correctness check, throughput benchmark, time estimate | **done** |
 | 1 | `G1Env` (reset/step/obs/termination, auto-reset, commands, gait clock) | **done** |
 | 2 | Rewards (22 terms, unit-tested, balance check in sim) | **done** |
-| 3 | Domain randomisation + pushes | next |
-| 4 | PPO training, checkpoints, resume, logging | |
+| 3 | Domain randomisation, action latency, pushes, curriculum level | **done** |
+| 4 | PPO training, checkpoints, resume, logging | next |
 | 5 | Evaluation (GPU MJX by default, CPU MuJoCo fallback + sim-to-sim) | |
 | 6 | Export (portable `.npz` + ONNX) | |
 
@@ -37,9 +37,10 @@ g1_rl/
   env.py           G1Env: per-env reset/step (vmapped by callers)
   vec_env.py       batched multi-GPU wrapper + jitted rollouts
   rewards.py       reward terms: pure functions of RewardInputs (unit-tested)
+  randomize.py     per-episode physics randomisation, latency, pushes
   render.py        offscreen MuJoCo video from qpos trajectories
 scripts/
-  install_kaggle.sh  check_setup.py  benchmark.py  env_smoke.py  reward_check.py  render_traj.py
+  install_kaggle.sh  check_setup.py  benchmark.py  env_smoke.py  reward_check.py  dr_check.py  render_traj.py
 tests/             pytest suite (runs on GPU or CPU)
 notebooks/kaggle_train.ipynb
 ```
@@ -64,9 +65,9 @@ Use `--platform cpu` on any script to force CPU.
 ## Versions and GitHub
 
 Each delivered package bumps `__version__` in `g1_rl/__init__.py`. On your
-computer, `update_from_zip.sh g1_rl.zip` commits it as one commit tagged
+computer, `update_from_zip.sh -m "..." g1_rl_x_y_z.zip` commits it as one commit tagged
 `v<version>` and pushes it. On Kaggle, the first notebook cell clones that tag
-(`GIT_REF = "v0.2.2"`) or `main`. Run outputs (`outputs/`, checkpoints) are
+(`GIT_REF = "v0.4.0"`) or `main`. Run outputs (`outputs/`, checkpoints) are
 git-ignored.
 
 ## Environment (Phase 1)
@@ -75,7 +76,7 @@ git-ignored.
 |---|---|
 | Control | 50 Hz, 5 physics substeps of 4 ms. Action a ∈ [-1,1]^29 → PD target `home + 0.5·a` (clipped to joint range) |
 | Policy obs (100) | gyro, gravity in body frame, command (vx, vy, ωz), joint pos − home, joint vel, last action, gait clock cos/sin (2 feet). Uniform noise |
-| Critic obs (139) | clean policy obs + base linear velocity, pelvis height, foot contact, foot height, foot air time, actuator torque / limit |
+| Critic obs (205) | clean policy obs + base linear velocity, pelvis height, foot contact, foot height, foot air time, actuator torque / limit, this episode's randomisation (friction, payload, CoM offset, kp/kd scales, latency, recent push) |
 | Commands | vx ∈ [−0.6, 1.0] m/s, vy ∈ [−0.5, 0.5] m/s, ωz ∈ [−1, 1] rad/s; 10 % stand-still; resampled every 5–10 s |
 | Reset | `knees_bent` pose + joint noise, random heading and xy, small base velocity; lowest foot placed on the floor |
 | Termination | pelvis < 0.5 m, tilt > 60°, or non-finite state. Time limit 20 s (flagged as truncation, not failure) |
@@ -109,6 +110,27 @@ Per step: `r = max(Σ wᵢ·termᵢ·dt, 0) + w_term·fell·dt` (dt = 0.02 s). W
 
 The reward uses the command the action was chosen for, so a command change does not
 mis-credit the step on which it happens.
+
+## Domain randomisation (Phase 3)
+
+Sampled once per episode (`config.DomainRandConfig`), applied every step by writing the
+values into this env's copy of the MJX model, so under vmap every robot is different.
+
+| Parameter | Range (level 1) | Nominal |
+|---|---|---|
+| Floor friction (all floor contacts) | 0.4 – 1.0 | 1.0 |
+| Link masses (inertia scaled with them) | ×0.9 – 1.1 per link | ×1 |
+| Torso payload | −1 – +3 kg | 0 |
+| Torso centre-of-mass offset | ±3 cm per axis | 0 |
+| Motor stiffness kp / damping kd | ×0.9 – 1.1 / ×0.8 – 1.2 per motor | ×1 |
+| Joint friction / armature | ×0.5 – 2.0 / ×0.95 – 1.05 per joint | ×1 |
+| Action latency | 50 % of episodes apply each action one step (20 ms) late | none |
+| Pushes | 0.1 – 0.6 m/s horizontal kick every 5 – 10 s | none |
+
+`level` ∈ [0, 1] (`info["dr_level"]`) shrinks every range toward nominal;
+`G1Env.set_dr_level(state, x)` changes it for all envs, effective at each env's next
+reset. Phase 4 uses it as a curriculum. The critic observes the sampled values; the
+policy does not and must be robust to them.
 
 ## Design notes (Phase 0 findings)
 

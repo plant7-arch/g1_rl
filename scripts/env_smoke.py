@@ -106,7 +106,8 @@ def main():
   after_done = step[:, 1:][done[:, :-1] > 0]
 
   checks = {
-      "obs sizes are 100 / 139": (s0.obs.shape[1], s0.priv_obs.shape[1]) == (100, 139),
+      f"obs sizes are 100 / {env.priv_obs_size}": (s0.obs.shape[1], s0.priv_obs.shape[1])
+      == (100, env.priv_obs_size),
       "all observations finite": bool(obs_ok.all()),
       "reset: body upright (gravity_z < -0.9)": bool((grav0[:, 2] < -0.9).all()),
       "reset: lowest foot on the floor, other < 3 cm": bool(
