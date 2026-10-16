@@ -43,6 +43,17 @@ class Policy:
       return jnp.clip(networks.mlp(layers, x, act), -1.0, 1.0)
 
     self._forward = jax.jit(forward)
+    # Host (NumPy) copies for building traceable functions (see jax_fn).
+    self._np = ([{k: np.asarray(v) for k, v in l.items()} for l in self._layers],
+                np.asarray(self._mean), np.asarray(self._var))
+    self._raw_forward = forward
+
+  def jax_fn(self):
+    """Pure obs -> action function for use inside other jitted code (e.g. a batched
+    MJX rollout sharded over several GPUs). Weights are embedded as host constants,
+    so the function is not tied to the device the policy was loaded on."""
+    layers, mean, var = self._np
+    return lambda obs: self._raw_forward(layers, mean, var, obs)
 
   @classmethod
   def load(cls, path: str, device=None) -> "Policy":

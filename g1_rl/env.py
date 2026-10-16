@@ -150,7 +150,7 @@ class G1Env:
     nu = self.nu
     q = jnp.asarray(self._home_q)
     xy = jax.random.uniform(ks[0], (2,), minval=-cfg.init_xy_range, maxval=cfg.init_xy_range)
-    yaw = jax.random.uniform(ks[1], (), minval=-jnp.pi, maxval=jnp.pi)
+    yaw = jax.random.uniform(ks[1], (), minval=-cfg.init_yaw_range, maxval=cfg.init_yaw_range)
     q = q.at[0:2].add(xy)
     q = q.at[3:7].set(gm.quat_mul(gm.yaw_quat(yaw), q[3:7]))
     q = q.at[self._qadr].add(jax.random.uniform(
@@ -239,6 +239,12 @@ class G1Env:
     return m
 
   # ---------------------------------------------------------------- public API
+  def refresh_obs(self, state: "State", rng) -> "State":
+    """Recompute observations after editing `state.info` (e.g. an evaluation setting a
+    command after reset), so the next action already sees the edit. Per env."""
+    obs, priv = self._observe(self.packer.unpack(state.data), state.info, rng)
+    return state._replace(obs=obs, priv_obs=priv)
+
   @staticmethod
   def set_dr_level(state: "State", level) -> "State":
     """Return `state` with a new randomisation level for all envs (batched or not).

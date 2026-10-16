@@ -20,8 +20,8 @@ iteration for logging.
 | 2 | Rewards (22 terms, unit-tested, balance check in sim) | **done** |
 | 3 | Domain randomisation, action latency, pushes, curriculum level | **done** |
 | 4 | PPO from scratch, multi-GPU train step, checkpoints/resume, policy export, logging, curriculum | **done** |
-| 5 | Evaluation (GPU MJX by default, CPU MuJoCo fallback + sim-to-sim) | next |
-| 6 | Export (portable `.npz` + ONNX) | |
+| 5 | Evaluation: MJX suite (GPU, CPU fallback), sim-to-sim in CPU MuJoCo incl. full mesh model, report, local viewer | **done** |
+| 6 | Export (portable `.npz` + ONNX) | next |
 
 ## Layout
 
@@ -47,9 +47,12 @@ g1_rl/
   checkpoint.py    portable .npz/.json checkpoints and policy export
   policy.py        standalone loader to run an exported policy (GPU, CPU fallback)
   logger.py        compact console line + metrics.jsonl
+  evaluate.py      MJX evaluation suite: one batched rollout over all scenarios
+  sim2sim.py       independent CPU MuJoCo runner (training model + full mesh model)
+  report.py        readiness checks, report.md/json, eval_summary.png
 scripts/
   install_kaggle.sh  check_setup.py  benchmark.py  env_smoke.py  reward_check.py  dr_check.py
-  train.py  plot_metrics.py  render_traj.py
+  train.py  plot_metrics.py  evaluate.py  play.py  render_traj.py
 tests/             pytest suite (runs on GPU or CPU)
 notebooks/kaggle_train.ipynb      interactive checks (each cell < 5 min)
 notebooks/kaggle_overnight.ipynb  the overnight training run (Save & Run All)
@@ -173,6 +176,32 @@ from g1_rl.policy import Policy
 pi = Policy.load("policy_final.npz")       # GPU if available, else CPU
 targets = pi.joint_targets(obs)             # obs: 100-vector, layout in policy_final.json
 ```
+
+## Evaluation (Phase 5)
+
+```bash
+python scripts/evaluate.py --run outputs/runs/<run>            # ~5 min on Kaggle 2xT4; --platform cpu works too
+python scripts/play.py --policy outputs/runs/<run>/policy_final.npz   # local, keyboard-driven viewer
+```
+
+**MJX suite** (GPU by default, CPU fallback): every scenario is one env in a single batch.
+
+| Group | Scenarios | Measures |
+|---|---|---|
+| grid | nominal robot; vx ∈ {−0.5…1.0}, vy ∈ {−0.4, 0, 0.4}, ωz ∈ {−0.8, 0, 0.8} | survival, velocity / yaw-rate tracking error, cost of transport, slip, step frequency, swing height, torque and joint-limit margins |
+| training | full randomisation, random commands, pushes (as in training) | survival, falls per minute, tracking |
+| ood | one parameter beyond its training range (friction 0.2–1.2, payload −2–8 kg, kp ×0.6–1.4, kd ×0.5–2, CoM ±6 cm, joint friction ×0.5–4, latency) | survival and tracking per value |
+| push | standing / walking 0.5 m/s, single kick 0.25–2 m/s, 4 directions | largest push always survived |
+
+**Sim-to-sim** (`sim2sim.py`) runs the exported policy in classic CPU MuJoCo (float64), with its
+own observation builder and action mapping taken only from the policy file. That is the same
+information a deployment controller has. It is verified against the training env: identical
+observations, and matching closed-loop motion for 0.5 s. It runs 9 scenarios on the training
+model and on the full mesh model (`scene.xml`: mesh contacts, 2 ms steps, 100 solver
+iterations, joint friction 3× training nominal; PD gains set to the policy's).
+
+Output: `report.md` with ✅/❌ readiness checks and tables, `report.json`, `eval_summary.png`,
+videos (`mjx_forward_0p5.mp4`, `full_model_forward_0p5.mp4`, `full_model_walk_push_left_0p5.mp4`).
 
 ## Design notes (Phase 0 findings)
 

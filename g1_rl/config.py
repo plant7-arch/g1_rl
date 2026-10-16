@@ -149,6 +149,7 @@ class EnvConfig:
   init_joint_noise: float = 0.05  # rad, uniform
   init_base_vel_noise: float = 0.1  # m/s and rad/s, uniform
   init_xy_range: float = 0.5  # m, uniform spawn offset
+  init_yaw_range: float = 3.141592653589793  # rad, uniform heading (evaluation uses 0)
   # Termination
   min_base_height: float = 0.5  # pelvis z (m); stands at ~0.75
   max_tilt_cos: float = 0.5  # terminate if body-up · world-up < this (tilt > 60 deg)
