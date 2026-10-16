@@ -14,7 +14,7 @@ MJ_SPEC="${MJ_SPEC:-mujoco-mjx}"
 echo ">> Installing ${JAX_SPEC} ${MJ_SPEC} ..."
 # Kaggle ships older jax/torch/tf; we only need jax here. Pip may warn about
 # torch/tensorflow CUDA pins: harmless, this pipeline never imports them.
-pip install -q -U "${JAX_SPEC}" "${MJ_SPEC}" mediapy 2>&1 | grep -v -i "dependency conflicts\|requires\|incompatible" || true
+pip install -q -U "${JAX_SPEC}" "${MJ_SPEC}" mediapy onnx onnxruntime 2>&1 | grep -v -i "dependency conflicts\|requires\|incompatible" || true
 pip install -q -e . --no-deps
 
 python - <<'EOF'

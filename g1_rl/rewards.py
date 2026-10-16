@@ -64,7 +64,16 @@ def make_consts(joint_names, home, lo, hi, cfg, dt) -> RewardConsts:
 
 
 def _moving(i):
+  """1 when the command asks for motion."""
   return (jnp.linalg.norm(i.command) > 1e-3).astype(jnp.float32)
+
+
+def _stepping(i, cfg):
+  """1 when the feet should follow the gait clock: a motion command, OR the base is
+  sliding (e.g. after a push) while asked to stand. Without the second case the
+  stand-still rewards forbid the recovery step a pushed robot needs."""
+  disturbed = jnp.linalg.norm(i.lin_vel[:2]) > cfg.stand_recovery_speed
+  return jnp.maximum(_moving(i), disturbed.astype(jnp.float32))
 
 
 # --- task -----------------------------------------------------------------------
@@ -82,19 +91,19 @@ def _alive(i, c, cfg):
 
 
 # --- gait -----------------------------------------------------------------------
-def _swing(i):
-  """Desired swing indicator per foot: 1 in the swing half of the clock while moving."""
-  return (jnp.sin(i.phase) > 0).astype(jnp.float32) * _moving(i)
+def _swing(i, cfg):
+  """Desired swing indicator per foot: 1 in the swing half of the clock while stepping."""
+  return (jnp.sin(i.phase) > 0).astype(jnp.float32) * _stepping(i, cfg)
 
 
 def _feet_phase(i, c, cfg):
-  target = cfg.swing_height * jnp.maximum(jnp.sin(i.phase), 0.0) * _moving(i)
+  target = cfg.swing_height * jnp.maximum(jnp.sin(i.phase), 0.0) * _stepping(i, cfg)
   err = jnp.sum(jnp.square(i.foot_height - target))
   return jnp.exp(-err / cfg.feet_phase_sigma)
 
 
 def _gait_contact(i, c, cfg):
-  want_contact = _swing(i) < 0.5
+  want_contact = _swing(i, cfg) < 0.5
   return jnp.mean((i.contact == want_contact).astype(jnp.float32))
 
 
@@ -138,7 +147,7 @@ def _pose(i, c, cfg):
 
 
 def _stand_still(i, c, cfg):
-  return jnp.sum(jnp.abs(i.joint_pos - c.home)) * (1.0 - _moving(i))
+  return jnp.sum(jnp.abs(i.joint_pos - c.home)) * (1.0 - _stepping(i, cfg))
 
 
 def _joint_limits(i, c, cfg):

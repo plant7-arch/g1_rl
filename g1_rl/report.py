@@ -168,7 +168,10 @@ def _plot(path, s, metrics):
     a.plot(range(len(vals)), [v["survival"] for v in vals.values()], marker="o", label=p)
   a.set(xlabel="value index (low → high)", ylabel="survival", ylim=(-0.05, 1.05),
         title="Beyond training ranges (see report.md for values)")
-  a.legend(fontsize=7)
+  if ood:
+    a.legend(fontsize=7)
+  else:
+    a.text(0.5, 0.5, "not run", ha="center", va="center", transform=a.transAxes, color="0.5")
   a.grid(alpha=0.3)
   a = ax[1, 1]
   dirs = ("front", "back", "left", "right")

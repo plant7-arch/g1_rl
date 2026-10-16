@@ -21,7 +21,7 @@ iteration for logging.
 | 3 | Domain randomisation, action latency, pushes, curriculum level | **done** |
 | 4 | PPO from scratch, multi-GPU train step, checkpoints/resume, policy export, logging, curriculum | **done** |
 | 5 | Evaluation: MJX suite (GPU, CPU fallback), sim-to-sim in CPU MuJoCo incl. full mesh model, report, local viewer | **done** |
-| 6 | Export (portable `.npz` + ONNX) | next |
+| 6 | Export: ONNX with embedded robot constants, portable `.npz`, standalone MuJoCo runner, numerical + closed-loop checks | **done** |
 
 ## Layout
 
@@ -50,9 +50,12 @@ g1_rl/
   evaluate.py      MJX evaluation suite: one batched rollout over all scenarios
   sim2sim.py       independent CPU MuJoCo runner (training model + full mesh model)
   report.py        readiness checks, report.md/json, eval_summary.png
+  export.py        ONNX export, NumPy reference, OnnxPolicy, deployment bundle
+deploy/
+  run_mujoco.py    standalone runner for policy.onnx (numpy + mujoco + onnxruntime only)
 scripts/
   install_kaggle.sh  check_setup.py  benchmark.py  env_smoke.py  reward_check.py  dr_check.py
-  train.py  plot_metrics.py  evaluate.py  play.py  render_traj.py
+  train.py  plot_metrics.py  evaluate.py  play.py  render_traj.py  export.py
 tests/             pytest suite (runs on GPU or CPU)
 notebooks/kaggle_train.ipynb      interactive checks (each cell < 5 min)
 notebooks/kaggle_overnight.ipynb  the overnight training run (Save & Run All)
@@ -80,7 +83,7 @@ Use `--platform cpu` on any script to force CPU.
 Each delivered package bumps `__version__` in `g1_rl/__init__.py`. On your
 computer, `update_from_zip.sh -m "..." g1_rl_x_y_z.zip` commits it as one commit tagged
 `v<version>` and pushes it. On Kaggle, the first notebook cell clones that tag
-(`GIT_REF = "v0.4.0"`) or `main`. Run outputs (`outputs/`, checkpoints) are
+(`GIT_REF = "v0.7.0"`) or `main`. Run outputs (`outputs/`, checkpoints) are
 git-ignored.
 
 ## Environment (Phase 1)
@@ -106,9 +109,9 @@ Per step: `r = max(Σ wᵢ·termᵢ·dt, 0) + w_term·fell·dt` (dt = 0.02 s). W
 | Group | Term | Weight | What it measures |
 |---|---|---|---|
 | Task | tracking_lin_vel | 1.5 | exp(−‖v_xy,cmd − v_xy‖²/0.25), velocity in the heading frame |
-| | tracking_ang_vel | 0.75 | exp(−(ω_z,cmd − ω_z)²/0.25) |
+| | tracking_ang_vel | 1.0 | exp(−(ω_z,cmd − ω_z)²/0.25) (0.75 before v0.7) |
 | | alive | 0.25 | 1 every step |
-| Gait | feet_phase | 1.0 | swing-foot height follows the clock (peak 8 cm); both feet down when the command is 0 |
+| Gait | feet_phase | 1.0 | swing-foot height follows the clock (peak 8 cm); both feet down when standing (*) |
 | | gait_contact | 0.5 | contact pattern matches the clock |
 | | feet_air_time | 1.0 | on touchdown: min(air − 0.3 s, 0.2 s); negative for shuffling steps; only while moving |
 | | feet_slip | −0.25 | ‖v_xy‖² of feet in contact |
@@ -116,10 +119,16 @@ Per step: `r = max(Σ wᵢ·termᵢ·dt, 0) + w_term·fell·dt` (dt = 0.02 s). W
 | | feet_distance | −10 | feet closer than 15 cm sideways (they stand 24 cm apart) |
 | Base | lin_vel_z / ang_vel_xy / orientation / base_height | −1 / −0.05 / −2 / −10 | bouncing, wobbling, leaning, pelvis away from 0.74 m |
 | Posture | pose | −0.5 | per-joint weighted (q − q_home)²: free hips/knees/arm swing, stiff hip roll/yaw, waist, wrists |
-| | stand_still | −0.2 | Σ\|q − q_home\| when the command is 0 |
+| | stand_still | −0.2 | Σ\|q − q_home\| when standing (*) |
 | | joint_limits | −5 | beyond 95 % of each joint range |
 | Effort | joint_vel / joint_acc / torques / energy / action_rate | −1e−3 / −2.5e−7 / −1e−5 / −1e−4 / −0.05 | regularisation |
 | Failure | termination | −50 | on a fall, added after the clip (−1.0 per fall) |
+
+(*) "Standing" = zero command **and** base slower than 0.25 m/s (`stand_recovery_speed`,
+v0.7). If a standing robot is pushed and starts sliding, the feet follow the gait clock
+and stand_still is off, so a recovery step is rewarded instead of penalised. The first
+run (g1_walk_v1, v0.6) recovered from ≥1 m/s pushes while walking but only ~0.5 m/s
+while standing, because standing required both feet down.
 
 The reward uses the command the action was chosen for, so a command change does not
 mis-credit the step on which it happens.
@@ -202,6 +211,24 @@ iterations, joint friction 3× training nominal; PD gains set to the policy's).
 
 Output: `report.md` with ✅/❌ readiness checks and tables, `report.json`, `eval_summary.png`,
 videos (`mjx_forward_0p5.mp4`, `full_model_forward_0p5.mp4`, `full_model_walk_push_left_0p5.mp4`).
+
+## Export (Phase 6)
+
+```bash
+python scripts/export.py --run outputs/runs/<run>        # -> outputs/export/<run>/, < 1 min on CPU
+```
+
+| file | |
+|---|---|
+| `policy.onnx` | input `obs` (batch, 100) → outputs `action` ∈ [−1, 1] and `joint_targets` (rad, PD targets). Normaliser, clips and action mapping are in the graph; observation layout, joint order, home pose, kp/kd, control rate are in the model metadata (`g1_rl` key), so this file alone is enough |
+| `policy.npz/.json` | the same policy for `g1_rl.policy.Policy` (JAX) |
+| `run_mujoco.py` | standalone runner/reference controller: `numpy`, `mujoco`, `onnxruntime` only; `--viewer` for keyboard control |
+| `README.md`, `export_info.json` | interface description; check results |
+
+Checks: ONNX = NumPy reference = JAX on 4096 observations (max difference ~1e-5), then the ONNX
+policy walks 10 s in the full mesh model, through both the g1_rl sim-to-sim runner and the
+standalone script. `--include-model` copies the Menagerie G1 model into the bundle.
+`g1_rl.export.OnnxPolicy` has the `Policy` interface, so `scripts/play.py --policy x.onnx` works too.
 
 ## Design notes (Phase 0 findings)
 

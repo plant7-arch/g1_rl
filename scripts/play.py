@@ -2,13 +2,15 @@
 
   python scripts/play.py --policy outputs/runs/g1_walk_v1/policy_final.npz
   python scripts/play.py --policy ... --model mjx      # simplified training model instead of full meshes
+  python scripts/play.py --policy outputs/export/g1_walk_v1/policy.onnx   # exported ONNX (onnxruntime)
 
 Keys (focus the viewer window):
   Up / Down      forward speed +/- 0.1 m/s        Left / Right   turn rate +/- 0.1 rad/s
   , / .          sideways speed +/- 0.1 m/s       Space          stop (all commands 0)
   P              push the robot sideways (0.5 m/s) R              reset
 
-Runs in real time; the policy runs on the GPU if JAX sees one, else on the CPU.
+Runs in real time; the policy runs on the GPU if available (JAX for .npz, onnxruntime
+for .onnx), else on the CPU.
 Needs a display (not for Kaggle). Uses the same runner as the sim-to-sim evaluation.
 """
 
@@ -41,10 +43,10 @@ def main():
   import numpy as np
 
   from g1_rl.config import SimConfig
-  from g1_rl.policy import Policy
+  from g1_rl.export import load_any
   from g1_rl.sim2sim import MujocoRunner
 
-  pi = Policy.load(args.policy, device=rt.devices[0])
+  pi = load_any(args.policy, device=rt.devices[0])
   xml = SimConfig().eval_xml_path if args.model == "full" else SimConfig().xml_path
   runner = MujocoRunner(xml, pi)
   cmd = {"vx": 0.0, "vy": 0.0, "wz": 0.0}

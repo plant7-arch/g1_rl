@@ -58,7 +58,7 @@ def _default_weights():
   return {
       # task
       "tracking_lin_vel": 1.5,  # exp(-|v_xy_cmd - v_xy|^2 / sigma), heading frame
-      "tracking_ang_vel": 0.75,  # exp(-(wz_cmd - wz)^2 / sigma)
+      "tracking_ang_vel": 1.0,  # (v0.7: was 0.75) exp(-(wz_cmd - wz)^2 / sigma)
       "alive": 0.25,
       # gait shaping (uses the gait clock the policy observes)
       "feet_phase": 1.0,  # swing-foot height follows the clock
@@ -74,7 +74,7 @@ def _default_weights():
       "base_height": -10.0,
       # posture / regularisation
       "pose": -0.5,  # weighted deviation from the home pose (per-joint weights below)
-      "stand_still": -0.2,  # joint deviation when the command is zero
+      "stand_still": -0.2,  # joint deviation when the command is zero and the base is still
       "joint_limits": -5.0,
       "joint_vel": -1e-3,
       "joint_acc": -2.5e-7,
@@ -108,6 +108,9 @@ class RewardConfig:
   feet_phase_sigma: float = 0.005
   air_time_target: float = 0.3  # s; touchdowns after shorter swings are penalised
   air_time_max_bonus: float = 0.2  # s; cap so the policy cannot farm long hops
+  # Zero command but base faster than this (m/s, horizontal): the feet follow the
+  # gait clock and stand_still is off, so a pushed robot may step to recover (v0.7).
+  stand_recovery_speed: float = 0.25
   min_feet_distance: float = 0.15  # m, lateral; feet stand 0.24 apart at home
   soft_joint_limit: float = 0.95  # fraction of the joint range considered safe
   only_positive: bool = True  # clip the per-step sum at 0 (before termination)

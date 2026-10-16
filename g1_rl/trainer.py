@@ -8,6 +8,7 @@ parameters to disk.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import math
 import os
@@ -23,6 +24,10 @@ from g1_rl.config import EnvConfig, PPOConfig
 from g1_rl.env import G1Env
 from g1_rl.logger import Logger
 from g1_rl.vec_env import VecEnv
+
+# Notebooks buffer stdout of subprocesses: without flushing, the last lines of a run
+# (final save, video) only appear when the process exits, so it looks stuck.
+print = functools.partial(print, flush=True)  # noqa: A001
 
 
 def _validate(cfg: PPOConfig, n_dev: int):

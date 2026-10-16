@@ -192,3 +192,25 @@ def test_weight_config(consts):
   assert "energy" not in t  # weight 0 disables a term
   with pytest.raises(KeyError):
     rewards.compute(baseline(consts), consts, dataclasses.replace(CFG, weights={"typo": 1.0}))
+
+
+def test_pushed_while_standing_may_step(consts):
+  """Zero command but the base is sliding (pushed): the feet should follow the clock
+  (a recovery step is rewarded, not penalised) and stand_still is off. Once the base
+  is slow again, the stand-still rewards are back."""
+  thr = CFG.stand_recovery_speed
+  s = baseline(consts, (0, 0, 0))
+  pushed = s._replace(lin_vel=jnp.array([thr + 0.2, 0.0, 0.0]))
+  step_h = CFG.swing_height * jnp.maximum(jnp.sin(s.phase), 0)  # left foot up, as the clock says
+  stepping = pushed._replace(foot_height=step_h, contact=step_h <= 0,
+                             joint_pos=s.joint_pos + 0.1)
+  feet_down = pushed._replace(joint_pos=s.joint_pos + 0.1)
+  t_step, t_down = terms_of(stepping, consts), terms_of(feet_down, consts)
+  assert t_step["feet_phase"] == pytest.approx(W["feet_phase"] * DT)
+  assert t_step["gait_contact"] == pytest.approx(W["gait_contact"] * DT)
+  assert t_down["feet_phase"] < t_step["feet_phase"] and t_down["gait_contact"] < t_step["gait_contact"]
+  assert t_step["stand_still"] == 0
+  assert t_step["feet_air_time"] == 0  # no stepping *bonus* for a standing command
+  slow = s._replace(lin_vel=jnp.array([thr - 0.1, 0.0, 0.0]), joint_pos=s.joint_pos + 0.1)
+  t_slow = terms_of(slow, consts)
+  assert t_slow["stand_still"] < 0 and t_slow["feet_phase"] == pytest.approx(W["feet_phase"] * DT)
