@@ -33,9 +33,8 @@ class Logger:
   def log(self, it: int, m: dict) -> None:
     """`it` = number of completed iterations (1-based)."""
     now = self.clock()
-    # Average throughput since the first logged iteration. Per-interval rates are
-    # misleading here: metrics are fetched asynchronously and checkpoints add
-    # back-to-back log calls, so the gap between two calls is not one iteration.
+    # Average throughput since the first logged iteration (which includes the
+    # compile, so it is the reference point rather than part of the average).
     if self.t_ref is None:
       self.t_ref, self.it_ref = now, it
     elif it > self.it_ref and now > self.t_ref:

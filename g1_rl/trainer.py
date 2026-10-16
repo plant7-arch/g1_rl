@@ -1,8 +1,8 @@
 """Training loop around ppo.make_train_step: resume, logging, checkpoints, time budget, video.
 
-The host only (1) launches the jitted iteration, (2) fetches the previous
-iteration's ~50 scalar metrics while the next one runs on the GPUs, and
-(3) every `ckpt_every` iterations copies the parameters to disk.
+The host only (1) launches the jitted iteration, (2) reads its ~50 scalar
+metrics for logging, and (3) every `ckpt_every` iterations copies the
+parameters to disk.
 """
 
 from __future__ import annotations
@@ -78,19 +78,7 @@ def train(ppo_cfg: PPOConfig, run_dir: str, rt, env_cfg: EnvConfig = EnvConfig()
 
   log = Logger(run_dir, n_iters, ppo_cfg.batch_size, ppo_cfg.log_every, start_it)
   deadline = t_start + max_hours * 3600 if max_hours else math.inf
-  pending, last_metrics, stopped, iter_time = None, {}, "finished", 0.0
-
-  def flush():
-    nonlocal pending, last_metrics, stopped
-    if pending is None:
-      return
-    it, m = pending
-    pending = None
-    m = {k: float(v) for k, v in jax.device_get(m).items()}
-    last_metrics = m
-    log.log(it, m)
-    if not all(math.isfinite(m[k]) for k in ("loss/policy", "loss/value")):
-      stopped = "diverged"
+  last_metrics, stopped, iter_time = {}, "finished", 0.0
 
   def save(tag: str):
     ckpt = checkpoint.save_checkpoint(run_dir, ts, dict(meta, env_steps=int(ts.iteration) * ppo_cfg.batch_size),
@@ -99,22 +87,24 @@ def train(ppo_cfg: PPOConfig, run_dir: str, rt, env_cfg: EnvConfig = EnvConfig()
                              {"env_steps": int(ts.iteration) * ppo_cfg.batch_size})
     return ckpt
 
-  it = start_it
+  # Synchronous loop: on GPU the jitted iteration does not return before it has
+  # finished anyway (MJX's solver while-loop is driven from the host), so waiting
+  # for the ~50 metric scalars costs nothing and gives exact per-iteration timing.
   for it in range(start_it, n_iters):
     t_it = time.time()
     if it == start_it:
       print("compiling the training step (first iteration takes a few minutes)...", flush=True)
     ts, env_state, m = step(ts, env_state)
-    flush()  # previous iteration's metrics, fetched while this one runs
-    pending = (it + 1, m)
+    m = {k: float(v) for k, v in jax.device_get(m).items()}
     if it == start_it:
-      jax.block_until_ready(m)
       print(f"first iteration (incl. compile) took {time.time() - t_it:.0f}s", flush=True)
-    if stopped == "diverged":
-      print(f"!! non-finite loss at iteration {it}; stopping. Last saved checkpoint is intact.")
+    last_metrics = m
+    log.log(it + 1, m)
+    if not all(math.isfinite(m[k]) for k in ("loss/policy", "loss/value")):
+      stopped = "diverged"
+      print(f"!! non-finite loss at iteration {it + 1}; stopping. Last saved checkpoint is intact.")
       break
     if (it + 1) % ppo_cfg.ckpt_every == 0:
-      flush()
       save("latest")
     iter_time = 0.9 * iter_time + 0.1 * (time.time() - t_it) if iter_time else time.time() - t_it
     if time.time() + 2 * iter_time + 120 > deadline:
@@ -123,7 +113,6 @@ def train(ppo_cfg: PPOConfig, run_dir: str, rt, env_cfg: EnvConfig = EnvConfig()
     if stop_after is not None and it + 1 - start_it >= stop_after:
       stopped = "stop_after"
       break
-  flush()
   log.close()
 
   done_it = int(jax.device_get(ts.iteration))

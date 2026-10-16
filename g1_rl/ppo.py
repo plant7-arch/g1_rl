@@ -117,6 +117,7 @@ def gradient_step(carry, mb, obs_stats, priv_stats, old_log_std, cfg):
   lr = adapt_lr(lr, aux["train/kl"], cfg)  # rsl_rl: adapt on the KL measured before the step
   params, opt = optim.adam_update(params, grads, opt, lr)
   aux["train/grad_norm"] = gnorm
+  aux["train/lr"] = lr
   return (params, opt, lr), aux
 
 
@@ -210,7 +211,11 @@ def make_train_step(env, cfg: PPOConfig, mesh):
     steps = float(N * T)
     msum = {k: v.sum() for k, v in mets.items()}
     n_ep = msum["episode/count"]
+    # Means over all epochs x minibatches. The adaptive LR rises and falls within an
+    # iteration (KL is measured against the rollout policy, so it grows as the
+    # epochs proceed), so the mean LR is more informative than its final value.
     out = {k: v.mean() for k, v in aux.items()}
+    out["train/kl_max"] = aux["train/kl"].max()
     out.update({
         # NaN (logged as null / "n/a") when no episode ended during this rollout
         "episode/return": jnp.where(n_ep > 0, msum["episode/return"] / jnp.maximum(n_ep, 1), jnp.nan),
@@ -219,7 +224,6 @@ def make_train_step(env, cfg: PPOConfig, mesh):
         "episode/count": n_ep,
         "rollout/reward": traj["reward"].mean(),
         "rollout/falls_per_1k_steps": msum["episode/fell"] / steps * 1000,
-        "train/lr": lr,
         "policy/std": jnp.exp(old_log_std).mean(),
         "value/explained_var": 1 - jnp.var(ret - values[:-1]) / (jnp.var(ret) + 1e-8),
         "curriculum/dr_level": ts.dr_level,
