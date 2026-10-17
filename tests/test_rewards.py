@@ -41,7 +41,7 @@ def baseline(c, cmd=(0.5, 0.0, 0.0), phase=(np.pi / 2, -np.pi / 2)):
       torques=jnp.zeros(nu), action=jnp.zeros(nu), last_action=jnp.zeros(nu),
       foot_height=fh, foot_vel_xy=jnp.zeros((2, 2)), foot_up_z=jnp.ones(2),
       contact=contact, first_contact=jnp.zeros(2, bool), air_time=jnp.zeros(2), phase=phase,
-      feet_lateral_distance=jnp.asarray(0.24), fell=jnp.asarray(False))
+      feet_lateral_distance=jnp.asarray(0.24), self_contacts=jnp.asarray(0.0), fell=jnp.asarray(False))
 
 
 def terms_of(i, c, cfg=CFG):
@@ -226,3 +226,19 @@ def test_arm_still_only_arms_and_only_when_standing(consts):
   assert terms_of(legs, consts)["arm_still"] == 0
   walking = baseline(consts)._replace(joint_pos=baseline(consts).joint_pos + 0.3 * arm)
   assert terms_of(walking, consts)["arm_still"] == 0  # arms may swing while walking
+
+
+def test_self_collision_counts_contacts(consts):
+  i = baseline(consts)
+  assert terms_of(i, consts)["self_collision"] == 0
+  t = terms_of(i._replace(self_contacts=jnp.asarray(2.0)), consts)["self_collision"]
+  assert t == pytest.approx(W["self_collision"] * 2 * DT)
+
+
+def test_tracking_kernel_punishes_ignoring_small_commands(consts):
+  """v0.9: standing still when asked for 0.15 m/s must cost a clear share of the
+  tracking reward (with the old sigma 0.25 it kept 91 %)."""
+  i = baseline(consts, (0.15, 0.0, 0.0))
+  ignore = i._replace(lin_vel=jnp.zeros(3))
+  ratio = terms_of(ignore, consts)["tracking_lin_vel"] / terms_of(i, consts)["tracking_lin_vel"]
+  assert ratio < 0.85

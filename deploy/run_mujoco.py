@@ -45,23 +45,29 @@ class Controller:
     self.kp, self.kd = np.asarray(m["kp"]), np.asarray(m["kd"])
     self.dt = float(m["ctrl_dt"])
     self.gait_freq = float(np.mean(m.get("gait_freq_range", [1.25, 1.5])))
+    self.history = int(m.get("history", 1))  # the policy sees the last `history` frames
+    self.frame_size = int(m.get("frame_size", m["obs_size"]))
     print(f"policy: iteration {m.get('iteration')}, running on {self.session.get_providers()[0]}")
     self.reset()
 
   def reset(self):
     self.last_action = np.zeros(len(self.home))
     self.phase = np.array([0.0, math.pi])
+    self.obs = None  # stacked observation of the previous step
 
   def __call__(self, gyro, gravity, command, joint_pos, joint_vel):
     """All inputs in the policy's joint order. Returns PD position targets (rad)."""
     L = self.layout
-    obs = np.zeros(self.meta["obs_size"], np.float32)
+    obs = np.zeros(self.frame_size, np.float32)
     obs[L["gyro"]], obs[L["gravity"]], obs[L["command"]] = gyro, gravity, command
     obs[L["joint_pos"]] = joint_pos - self.home
     obs[L["joint_vel"]] = joint_vel
     obs[L["last_act"]] = self.last_action
     obs[L["gait"]] = np.concatenate([np.cos(self.phase), np.sin(self.phase)])
-    action, targets = self.session.run(None, {"obs": obs[None]})
+    # newest frame first; at the first step the frame fills the whole history
+    self.obs = (np.tile(obs, self.history) if self.obs is None
+                else np.concatenate([obs, self.obs[:-self.frame_size]]) if self.history > 1 else obs)
+    action, targets = self.session.run(None, {"obs": self.obs[None]})
     self.last_action = action[0].astype(np.float64)
     self.phase = (self.phase + 2 * math.pi * self.gait_freq * self.dt + math.pi) % (2 * math.pi) - math.pi
     return targets[0].astype(np.float64)

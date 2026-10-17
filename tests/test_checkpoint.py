@@ -27,6 +27,7 @@ class FakeEnv:
     self.cfg = EnvConfig()
     self.obs_size, self.priv_obs_size, self.action_size, self.dt = 100, 205, 29, 0.02
     self.obs_layout = {"gyro": slice(0, 3), "_size": 100}
+    self.frame_size, self.history = 100, 1
     from g1_rl.env import action_scales
     self.action_scale = action_scales(self.robot.actuator_names, self.cfg)
 

@@ -55,12 +55,18 @@ def obs_map(layout: dict, jperm, jsign):
   return perm, sign
 
 
+def stacked(perm, sign, frames: int):
+  """Extend a one-frame map to `frames` stacked frames (each mirrored on its own)."""
+  n = len(perm)
+  return (np.concatenate([perm + k * n for k in range(frames)]), np.tile(sign, frames))
+
+
 def for_env(env):
-  """(obs_perm, obs_sign, act_perm, act_sign) for a G1Env."""
+  """(obs_perm, obs_sign, act_perm, act_sign) for a G1Env (whole stacked observation)."""
   m = env.mj_model
   axes = m.jnt_axis[m.actuator_trnid[:, 0]]
   jp, js = joint_map(env.robot.actuator_names, axes)
-  op, os_ = obs_map(env.obs_layout, jp, js)
+  op, os_ = stacked(*obs_map(env.obs_layout, jp, js), getattr(env, "history", 1))
   return op, os_, jp, js
 
 

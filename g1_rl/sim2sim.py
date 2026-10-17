@@ -47,6 +47,8 @@ class MujocoRunner:
     meta = policy.meta
     self.layout = {k: slice(*v) for k, v in meta["obs_layout"].items()}
     self.obs_size = meta["obs_size"]
+    self.history = int(meta.get("history", 1))  # frames stacked newest first (v0.9)
+    self.frame_size = int(meta.get("frame_size", self.obs_size))
     self.ctrl_dt = float(meta["ctrl_dt"])
     self.n_sub = max(1, round(self.ctrl_dt / self.m.opt.timestep))
     if abs(self.n_sub * self.m.opt.timestep - self.ctrl_dt) > 1e-9:
@@ -90,6 +92,7 @@ class MujocoRunner:
     self.command = np.asarray(command, np.float64)
     self.last_action = np.zeros(len(self.qadr))
     self.phase = np.array([0.0, math.pi])
+    self.obs_hist = None  # last stacked observation (None = new episode: fill with the frame)
     self.t = 0
 
   def _lowest_foot_point(self) -> float:
@@ -110,9 +113,21 @@ class MujocoRunner:
     return bool((m.geom_contype[g] & m.geom_conaffinity[f]) or (m.geom_contype[f] & m.geom_conaffinity[g]))
 
   def observation(self) -> np.ndarray:
+    """The policy input for this control step: the current frame + the previous ones.
+    Call once per control step (it advances the history)."""
+    f = self.frame()
+    if self.obs_hist is None:
+      obs = np.tile(f, self.history)
+    else:
+      obs = np.concatenate([f, self.obs_hist[:-self.frame_size]]) if self.history > 1 else f
+    self.obs_hist = obs
+    return obs
+
+  def frame(self) -> np.ndarray:
+    """One observation frame from the current state (same layout as the training env)."""
     d, L = self.d, self.layout
     q = d.qpos[3:7]
-    obs = np.zeros(self.obs_size, np.float32)
+    obs = np.zeros(self.frame_size, np.float32)
     obs[L["gyro"]] = d.qvel[3:6]  # free-joint angular velocity is in the body frame
     obs[L["gravity"]] = _quat_rotate_inverse(q, np.array([0.0, 0.0, -1.0]))
     obs[L["command"]] = self.command

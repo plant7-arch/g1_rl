@@ -95,4 +95,9 @@ def test_observation_of_mirrored_robot(env):
 
   o = np.asarray(observe(jnp.asarray(q), jnp.asarray(v), info))
   om = np.asarray(observe(jnp.asarray(qm), jnp.asarray(vm), info_m))
-  np.testing.assert_allclose(om, symmetry.apply(o, op, os_), atol=1e-5)
+  fp, fs = symmetry.obs_map(env.obs_layout, jp, js)  # one frame
+  np.testing.assert_allclose(om, symmetry.apply(o, fp, fs), atol=1e-5)
+  # the stacked map mirrors every frame the same way
+  assert len(op) == env.obs_size
+  stacked = np.tile(o, env.history)
+  np.testing.assert_allclose(symmetry.apply(stacked, op, os_), np.tile(symmetry.apply(o, fp, fs), env.history))

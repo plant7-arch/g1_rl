@@ -10,6 +10,9 @@ Groups
   training   full randomisation, random commands and pushes as in training (robustness)
   ood        one physics parameter pushed beyond the training range (generalisation)
   push       a single push of increasing strength in 4 directions (push recovery)
+  slope      standing / walking on 3-9 deg slopes, up, down and across (v0.9)
+  imu        IMU mounted 3 deg off in pitch or roll (v0.9)
+  small      small commands (0.15-0.2 m/s, 0.2-0.3 rad/s): does it move at all? (v0.9)
 
 Per-step signals are recorded on device; metrics are computed with NumPy afterwards.
 """
@@ -62,13 +65,13 @@ def build_suite(quick: bool = False) -> list:
     s.append(Scenario("training", f"train#{i}", dr_level=1.0, resample_commands=True,
                       random_pushes=True))
   ood = {
-      "friction": (0.2, 0.3, 0.4, 0.6, 0.8, 1.0, 1.2),
-      "payload": (-2.0, 0.0, 2.0, 4.0, 6.0, 8.0),
-      "kp_scale": (0.6, 0.8, 1.0, 1.2, 1.4),
+      "friction": (0.15, 0.2, 0.3, 0.6, 1.0, 1.5),
+      "payload": (-2.0, 0.0, 4.0, 8.0, 12.0),
+      "kp_scale": (0.6, 0.7, 0.8, 1.0, 1.3, 1.5),
       "kd_scale": (0.5, 1.0, 1.5, 2.0),
       "com_offset_x": (-0.06, -0.03, 0.0, 0.03, 0.06),
       "frictionloss_scale": (0.5, 1.0, 2.0, 3.0, 4.0),
-      "latency": (0, 1),
+      "latency": (0, 1, 2, 3),
   }
   if quick:
     ood = {k: (v[0], v[len(v) // 2], v[-1]) if len(v) > 2 else v for k, v in ood.items()}
@@ -86,6 +89,24 @@ def build_suite(quick: bool = False) -> list:
           s.append(Scenario("push", f"{cmd_name}/{dname}/{m}", cmd, push_time=4.0,
                             push_vel=(m * d[0], m * d[1]),
                             tag={"cmd": cmd_name, "dir": dname, "mag": m}))
+  # Slopes: gravity tilted by `deg`, pulling toward `downhill` (deg, robot faces +x).
+  downhill = {"up": 180.0, "down": 0.0, "across": 90.0}
+  for deg in ((3, 6) if quick else (3, 6, 9)):
+    for dname, phi in downhill.items():
+      for cmd_name, cmd in (("stand", (0.0, 0.0, 0.0)), ("walk", (0.5, 0.0, 0.0))):
+        s.append(Scenario("slope", f"slope {deg} {dname}/{cmd_name}", cmd,
+                          dr_override={"slope": (deg, phi)},
+                          tag={"deg": deg, "dir": dname, "cmd": cmd_name}))
+  for axis, sign in (("pitch", 1), ("pitch", -1), ("roll", 1)):
+    for cmd_name, cmd in (("stand", (0.0, 0.0, 0.0)), ("walk", (0.5, 0.0, 0.0))):
+      tilt = (0.0, sign * 3.0) if axis == "pitch" else (3.0, 0.0)
+      s.append(Scenario("imu", f"imu {axis} {sign * 3:+d}deg/{cmd_name}", cmd,
+                        dr_override={"imu_tilt_deg": tilt},
+                        tag={"axis": axis, "deg": sign * 3, "cmd": cmd_name}))
+  smalls = [(0.15, 0, 0), (0.2, 0, 0), (-0.15, 0, 0), (-0.2, 0, 0), (0, 0.15, 0), (0, -0.15, 0),
+            (0, 0, 0.2), (0, 0, -0.2), (0, 0, 0.3), (0, 0, -0.3)]
+  for c in (smalls[::2] if quick else smalls):
+    s.append(Scenario("small", f"small cmd{c}", c, tag={"vx": c[0], "vy": c[1], "wz": c[2]}))
   return s
 
 
@@ -110,7 +131,13 @@ def _apply_scenarios(env: G1Env, state, scenarios, steps: int):
       if k == "com_offset_x":
         info["dr"]["com_offset"][i] = (v, 0.0, 0.0)
       elif k == "latency":
-        info["dr"]["latency"][i] = bool(v)
+        info["dr"]["latency"][i] = int(v)
+      elif k == "slope":  # (tilt deg, direction gravity pulls in deg)
+        th, ph = math.radians(v[0]), math.radians(v[1])
+        info["dr"]["gravity_dir"][i] = (math.sin(th) * math.cos(ph), math.sin(th) * math.sin(ph),
+                                        -math.cos(th))
+      elif k == "imu_tilt_deg":  # (roll, pitch) mounting error in deg
+        info["dr"]["imu_tilt"][i] = np.radians(v)
       else:  # scalar params (friction, payload) or per-joint scales set uniformly
         info["dr"][k][i] = v
     if sc.push_time is not None:
@@ -249,6 +276,37 @@ def summarise(metrics: list) -> dict:
     out["ood"] = {p: {str(v): {"survival": _mean([x["survived"] for x in ms]),
                                "lin_vel_err": _mean([x.get("lin_vel_err") for x in ms])}
                       for v, ms in sorted(vals.items())} for p, vals in table.items()}
+  slope = by("slope")
+  if slope:
+    out["slope"] = {}
+    for m in slope:
+      key = f"{m['deg']} deg {m['dir']}"
+      e = out["slope"].setdefault(key, {})
+      e[m["cmd"]] = {"survived": m["survived"], "vx": m.get("vx_mean"), "lin_vel_err": m.get("lin_vel_err")}
+    ok = [m for m in slope if m["deg"] <= 6]
+    out["slope_summary"] = {
+        "survival_le6": _mean([m["survived"] for m in ok]),
+        "stand_drift_le6": _mean([m.get("lin_vel_err") if m["survived"] else 2.0 for m in ok
+                                  if m["cmd"] == "stand"]),
+        "walk_err_le6": _mean([m.get("lin_vel_err") if m["survived"] else 2.0 for m in ok
+                               if m["cmd"] == "walk"])}
+  imu = by("imu")
+  if imu:
+    out["imu"] = {m["name"]: {"survived": m["survived"], "lin_vel_err": m.get("lin_vel_err")} for m in imu}
+    out["imu_summary"] = {"stand_drift": _mean([m.get("lin_vel_err") if m["survived"] else 2.0
+                                                for m in imu if m["cmd"] == "stand"])}
+  small = by("small")
+  if small:
+    rows = {}
+    for m in small:
+      c = np.array([m["vx"], m["vy"], m["wz"]])
+      got = np.array([m.get("vx_mean") or 0.0, m.get("vy_mean") or 0.0, m.get("wz_mean") or 0.0])
+      k = int(np.argmax(np.abs(c)))
+      rows[m["name"]] = {"command": float(c[k]), "achieved": float(got[k]),
+                         "fraction": float(got[k] / c[k]) if m["survived"] else 0.0}
+    out["small"] = rows
+    out["small_summary"] = {"mean_fraction": _mean([r["fraction"] for r in rows.values()]),
+                            "min_fraction": min(r["fraction"] for r in rows.values())}
   push = by("push")
   if push:
     res = {}

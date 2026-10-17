@@ -8,14 +8,22 @@ step that just finished.
 
 Observations
 ------------
-Policy ("obs", what the real robot can sense; noisy):
+Policy ("obs", what the real robot can sense; noisy). One frame:
   gyro(3) gravity_in_body(3) command(3) joint_pos-home(29) joint_vel(29)
   last_action(29) gait_phase cos/sin(4)                               = 100
+and the policy sees the last `obs_history` frames, newest first (v0.9: 5 x 100 = 500).
+`obs_layout` describes one frame; the current frame is obs[:frame_size].
+The policy frame also carries this episode's sensor errors (IMU mounting tilt,
+gyro bias, joint-encoder offsets) on top of the noise.
 Critic ("priv_obs", simulator-only extras; noise-free):
-  clean policy obs(100) base_lin_vel_body(3) base_height(1) foot_contact(2)
+  clean current frame(100) base_lin_vel_body(3) base_height(1) foot_contact(2)
   foot_height(2) foot_air_time(2) actuator_force/limit(29)
   randomised robot: friction(1) payload(1) com_offset(3) kp_scale(29)
-  kd_scale(29) latency(1) recent_push(2)                              = 205
+  kd_scale(29) latency(1) recent_push(2) slope(2) imu_tilt(2) gyro_bias(3) = 212
+
+Slopes (v0.9) are simulated by tilting gravity (info["dr"]["gravity_dir"]): the floor
+stays the plane z = 0, so contacts, foot heights and velocities are all measured in
+the slope's own frame, while "gravity in the body frame" uses the tilted direction.
 
 Domain randomisation (randomize.py) is sampled per episode and stored in
 info["dr"]; info["dr_level"] in [0, 1] scales it (curriculum, see set_dr_level).
@@ -46,6 +54,21 @@ def _layout(parts):
     i += n
   out["_size"] = i
   return out
+
+
+def _rot_roll_pitch(roll, pitch):
+  cr, sr, cp, sp = jnp.cos(roll), jnp.sin(roll), jnp.cos(pitch), jnp.sin(pitch)
+  rx = jnp.array([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]])
+  ry = jnp.array([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]])
+  return rx @ ry
+
+
+def stack_frames(frame, prev_obs=None, history: int = 1):
+  """Policy observation = the last `history` frames, newest first. With no previous
+  observation (a new episode) the current frame fills every slot."""
+  if prev_obs is None:
+    return jnp.tile(frame, history)
+  return jnp.concatenate([frame, prev_obs[:-frame.shape[-1]]]) if history > 1 else frame
 
 
 def action_scales(joint_names, cfg: EnvConfig) -> np.ndarray:
@@ -96,6 +119,7 @@ class G1Env:
     self.dr = randomize.Randomizer(m, cfg.dr, r.torso_body_id, self.dt)
     caps = np.array([[m.geom(n).id for n in foot] for foot in FOOT_CAPSULES], np.int32)
     self._foot_caps = caps  # (2, 3)
+    self._geom_body = np.asarray(m.geom_bodyid, np.int32)
     self._cap_radius = m.geom_size[caps, 0].astype(np.float32)
     self._cap_halflen = m.geom_size[caps, 1].astype(np.float32)
 
@@ -104,8 +128,10 @@ class G1Env:
     nu = r.nu
     self.obs_layout = _layout([("gyro", 3), ("gravity", 3), ("command", 3), ("joint_pos", nu),
                                ("joint_vel", nu), ("last_act", nu), ("gait", 4)])
-    self.obs_size = self.obs_layout["_size"]
-    self.priv_layout = _layout([("obs", self.obs_size), ("lin_vel", 3), ("height", 1),
+    self.frame_size = self.obs_layout["_size"]
+    self.history = max(1, int(cfg.obs_history))
+    self.obs_size = self.frame_size * self.history
+    self.priv_layout = _layout([("obs", self.frame_size), ("lin_vel", 3), ("height", 1),
                                 ("contact", 2), ("foot_height", 2), ("air_time", 2),
                                 ("act_force", nu), ("dr", self.dr.priv_size)])
     self.priv_obs_size = self.priv_layout["_size"]
@@ -124,16 +150,22 @@ class G1Env:
     lo = jnp.array([c.lin_vel_x[0], c.lin_vel_y[0], c.ang_vel_z[0]])
     hi = jnp.array([c.lin_vel_x[1], c.lin_vel_y[1], c.ang_vel_z[1]])
     cmd = jax.random.uniform(k1, (3,), minval=lo, maxval=hi)
+    # Some commands are drawn from a small range so slow walking/turning is practised.
+    small = jnp.clip(jax.random.uniform(k4, (3,), minval=-1.0, maxval=1.0) * jnp.asarray(c.small_range),
+                     lo, hi)
+    cmd = jnp.where(jax.random.uniform(jax.random.fold_in(k4, 1)) < c.small_prob, small, cmd)
     cmd = jnp.where(jnp.abs(cmd) < c.deadband, 0.0, cmd)
     cmd = jnp.where(jax.random.uniform(k2) < c.zero_prob, jnp.zeros(3), cmd)
     timer = jax.random.randint(k3, (), c.resample_steps[0], c.resample_steps[1] + 1)
     return cmd, timer
 
   def _observe(self, d, info, rng):
+    """(noisy policy frame, privileged critic obs) for the current state."""
     q, v = d.qpos, d.qvel
     quat = q[3:7]
+    dr = info["dr"]
     gyro = v[3:6]  # free-joint angular velocity is already in the body frame
-    gravity = gm.quat_rotate_inverse(quat, jnp.array([0.0, 0.0, -1.0]))
+    gravity = gm.quat_rotate_inverse(quat, dr["gravity_dir"])
     jpos = q[self._qadr] - self._home_u
     jvel = v[self._vadr]
     phase = info["phase"]
@@ -146,6 +178,13 @@ class G1Env:
         jnp.full(self.nu, n.joint_pos), jnp.full(self.nu, n.joint_vel),
         jnp.zeros(self.nu), jnp.zeros(4)]) * n.level
     noisy = clean + scale * jax.random.uniform(rng, clean.shape, minval=-1.0, maxval=1.0)
+    # This episode's sensor errors (policy only): IMU mounted slightly tilted, gyro bias,
+    # joint-encoder offsets.
+    L = self.obs_layout
+    rot = _rot_roll_pitch(dr["imu_tilt"][0], dr["imu_tilt"][1])
+    noisy = noisy.at[L["gyro"]].set(rot @ noisy[L["gyro"]] + dr["gyro_bias"])
+    noisy = noisy.at[L["gravity"]].set(rot @ noisy[L["gravity"]])
+    noisy = noisy.at[L["joint_pos"]].add(dr["joint_offset"])
 
     lin_vel = gm.quat_rotate_inverse(quat, v[0:3])
     fh = self.foot_heights(d)
@@ -208,8 +247,19 @@ class G1Env:
     info["push_timer"], info["push_kick"] = self.dr.sample_push(ks[9], dr_level)
     return d, info, ks[7]
 
+  def _self_contacts(self, d):
+    """Number of robot-robot contact pairs in penetration (legs, hands/arms vs torso and
+    hips). MJX keeps one fixed-size contact slot per pair; slots of pairs that are far
+    apart have a large positive distance."""
+    c = getattr(d, "_impl", d).contact
+    g = c.geom
+    valid = (g[:, 0] >= 0) & (g[:, 1] >= 0)
+    body = jnp.asarray(self._geom_body)
+    robot = (body[jnp.maximum(g[:, 0], 0)] > 0) & (body[jnp.maximum(g[:, 1], 0)] > 0)
+    return jnp.sum(valid & robot & (c.dist < 0)).astype(jnp.float32)
+
   def _reward_terms(self, d, d_prev, prev_info, phase, action, contact, first_contact,
-                    air_time, fh, fell):
+                    air_time, fh, fell, self_contacts):
     """Build RewardInputs for one env and evaluate all reward terms."""
     q, v = d.qpos, d.qvel
     quat = q[3:7]
@@ -221,7 +271,7 @@ class G1Env:
         command=prev_info["command"],  # the command the action was chosen for
         lin_vel=gm.quat_rotate_inverse(heading, v[0:3]),
         ang_vel=v[3:6],
-        gravity=gm.quat_rotate_inverse(quat, jnp.array([0.0, 0.0, -1.0])),
+        gravity=gm.quat_rotate_inverse(quat, prev_info["dr"]["gravity_dir"]),
         base_height=q[2],
         joint_pos=q[self._qadr],
         joint_vel=v[self._vadr],
@@ -237,6 +287,7 @@ class G1Env:
         air_time=air_time,
         phase=phase,
         feet_lateral_distance=jnp.abs(rel[1]),
+        self_contacts=self_contacts,
         fell=fell,
     )
     return rewards.compute(inp, self._rconsts, self.cfg.reward)
@@ -254,8 +305,8 @@ class G1Env:
   def refresh_obs(self, state: "State", rng) -> "State":
     """Recompute observations after editing `state.info` (e.g. an evaluation setting a
     command after reset), so the next action already sees the edit. Per env."""
-    obs, priv = self._observe(self.packer.unpack(state.data), state.info, rng)
-    return state._replace(obs=obs, priv_obs=priv)
+    frame, priv = self._observe(self.packer.unpack(state.data), state.info, rng)
+    return state._replace(obs=stack_frames(frame, None, self.history), priv_obs=priv)
 
   @staticmethod
   def set_dr_level(state: "State", level) -> "State":
@@ -272,11 +323,12 @@ class G1Env:
     level = self.cfg.dr.level if dr_level is None else dr_level
     d = sim.init_data(self.mx, jnp.asarray(self._home_q), jnp.asarray(self._home_u))
     d, info, obs_rng = self._fresh_episode(d, rng, level)
-    obs, priv = self._observe(d, info, obs_rng)
+    frame, priv = self._observe(d, info, obs_rng)
+    obs = stack_frames(frame, None, self.history)
     zero = jnp.zeros(())
     terms = self._reward_terms(d, d, info, info["phase"], jnp.zeros(self.nu), info["contact"],
                                info["contact"] & False, info["feet_air_time"],
-                               self.foot_heights(d), jnp.array(False))
+                               self.foot_heights(d), jnp.array(False), jnp.zeros(()))
     metrics = self._metrics({k: zero for k in terms}, zero, zero, zero, zero)
     metrics["debug/dr_level"] = zero
     metrics["debug/pushes"] = zero
@@ -290,8 +342,9 @@ class G1Env:
     model = self.dr.apply(self.mx, info["dr"])  # this env's randomised robot
 
     action = jnp.clip(action, -1.0, 1.0)
-    # Latency: in "late" episodes the motors receive the previous action.
-    applied = jnp.where(info["dr"]["latency"], info["last_act"], action)
+    # Latency: in "late" episodes the motors receive the action from 1 or 2 steps ago.
+    lat = info["dr"]["latency"]
+    applied = jnp.where(lat >= 2, info["last_last_act"], jnp.where(lat >= 1, info["last_act"], action))
     targets = jnp.clip(self._home_u + self.action_scale * applied, self._lo, self._hi)
 
     # Push: an instantaneous horizontal base-velocity kick every few seconds.
@@ -331,7 +384,7 @@ class G1Env:
 
     # --- reward --------------------------------------------------------------
     terms = self._reward_terms(d, d_prev, state.info, info["phase"], action, contact,
-                               first_contact, air_time, fh, fell)
+                               first_contact, air_time, fh, fell, self._self_contacts(d))
     reward = rewards.total(terms, cfg.reward)
 
     info["last_last_act"] = info["last_act"]
@@ -341,7 +394,8 @@ class G1Env:
     info["ep_return"] = info["ep_return"] + reward
     info["rng"] = rng
 
-    obs, priv = self._observe(d, info, k_obs)
+    frame, priv = self._observe(d, info, k_obs)
+    obs = stack_frames(frame, state.obs, self.history)
 
     f_done = done.astype(jnp.float32)
     metrics = self._metrics(terms, info["ep_return"], info["step"].astype(jnp.float32),
@@ -351,7 +405,8 @@ class G1Env:
 
     # --- auto-reset ------------------------------------------------------------
     d_new, info_new, k_obs2 = self._fresh_episode(d, k_reset, info["dr_level"])
-    obs_new, priv_new = self._observe(d_new, info_new, k_obs2)
+    frame_new, priv_new = self._observe(d_new, info_new, k_obs2)
+    obs_new = stack_frames(frame_new, None, self.history)
     d = sim.tree_where(done, d_new, d)
     info = sim.tree_where(done, info_new, info)
     obs = jnp.where(done, obs_new, obs)

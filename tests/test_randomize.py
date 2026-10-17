@@ -30,7 +30,12 @@ def test_level_zero_is_the_nominal_robot(setup):
   for f in MODEL_FIELDS:
     np.testing.assert_allclose(np.asarray(getattr(out, f)), np.asarray(getattr(mx, f)),
                                rtol=1e-6, atol=1e-7, err_msg=f)
-  assert not bool(r.sample(jax.random.PRNGKey(3), 0.0)["latency"])
+  nom = r.sample(jax.random.PRNGKey(3), 0.0)
+  assert int(nom["latency"]) == 0
+  np.testing.assert_allclose(np.asarray(nom["gravity_dir"]), [0, 0, -1], atol=1e-7)
+  np.testing.assert_allclose(np.asarray(out.opt.gravity), np.asarray(mx.opt.gravity), atol=1e-6)
+  for k in ("imu_tilt", "gyro_bias", "joint_offset"):
+    assert np.abs(np.asarray(nom[k])).max() == 0, k
 
 
 def test_full_level_samples_within_ranges(setup):
@@ -44,8 +49,19 @@ def test_full_level_samples_within_ranges(setup):
     assert v.min() >= lo - 1e-6 and v.max() <= hi + 1e-6, k
     assert v.std() > 0.1 * (hi - lo) / np.sqrt(12), f"{k} barely varies"
   assert np.abs(np.asarray(dr["com_offset"])).max() <= CFG.torso_com_offset + 1e-6
-  lat = np.asarray(dr["latency"]).mean()
-  assert abs(lat - CFG.latency_prob) < 0.12
+  lat = np.asarray(dr["latency"])
+  assert set(np.unique(lat)) <= {0, 1, 2}
+  p1, p2 = CFG.latency_probs
+  assert abs((lat == 1).mean() - p1) < 0.1 and abs((lat == 2).mean() - p2) < 0.08
+  # slopes: unit gravity vectors, tilted in ~slope_prob of episodes, never beyond the max
+  g = np.asarray(dr["gravity_dir"])
+  np.testing.assert_allclose(np.linalg.norm(g, axis=1), 1.0, atol=1e-5)
+  tilt = np.degrees(np.arccos(-g[:, 2]))
+  assert tilt.max() <= CFG.slope_max_deg + 1e-3
+  assert abs((tilt > 1e-3).mean() - CFG.slope_prob) < 0.1
+  assert np.abs(np.asarray(dr["imu_tilt"])).max() <= np.radians(CFG.imu_tilt_deg) + 1e-6
+  assert np.abs(np.asarray(dr["gyro_bias"])).max() <= CFG.gyro_bias + 1e-6
+  assert np.abs(np.asarray(dr["joint_offset"])).max() <= CFG.joint_offset + 1e-6
   # per-actuator gains vary within one robot
   assert np.asarray(dr["kp_scale"])[0].std() > 0
 

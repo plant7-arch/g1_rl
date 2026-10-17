@@ -66,6 +66,7 @@ def _copy_into_runner(runner, env, state):
   runner.last_action = np.asarray(state.info["last_act"], np.float64)
   runner.phase = np.asarray(state.info["phase"], np.float64)
   runner.gait_freq = float(state.info["phase_dt"]) / (2 * math.pi * env.dt)
+  runner.obs_hist = None  # history restarts like after the env's refresh_obs
 
 
 def test_observation_matches_training_env(policy):
@@ -73,10 +74,14 @@ def test_observation_matches_training_env(policy):
   step = jax.jit(env.step)
   s = _fixed_episode(env, jax.jit(env.reset)(jax.random.PRNGKey(1)))
   pi = policy.jax_fn()
+  prev = None
   for _ in range(5):  # move a little so velocities and last action are non-trivial
+    prev = np.asarray(s.obs)
     s = step(s, pi(s.obs))
   runner = MujocoRunner(SimConfig().xml_path, policy)
   _copy_into_runner(runner, env, s)
+  np.testing.assert_allclose(runner.frame(), np.asarray(s.obs)[:env.frame_size], rtol=1e-4, atol=1e-5)
+  runner.obs_hist = prev  # the runner's history = the env's observation one step earlier
   np.testing.assert_allclose(runner.observation(), np.asarray(s.obs), rtol=1e-4, atol=1e-5)
 
 

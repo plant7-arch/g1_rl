@@ -114,7 +114,11 @@ def main():
   print(f"  kp scale            {spread(d['kp_scale'])}")
   print(f"  kd scale            {spread(d['kd_scale'])}")
   print(f"  torso CoM offset (m){spread(d['com_offset'])}")
-  print(f"  late (1-step latency) episodes: {np.mean(d['latency']):.0%}")
+  print(f"  action latency      1 step: {np.mean(d['latency'] == 1):.0%}, 2 steps: {np.mean(d['latency'] == 2):.0%}")
+  tilt = np.degrees(np.arccos(-np.asarray(d["gravity_dir"])[:, 2]))
+  print(f"  slope (deg)         {spread(tilt)}, on a slope: {np.mean(tilt > 1e-3):.0%}")
+  print(f"  IMU tilt (deg)      {spread(np.degrees(d['imu_tilt']))}")
+  print(f"  gyro bias (rad/s)   {spread(d['gyro_bias'])}")
   print(f"\n{'':22}{'nominal (0)':>14}{'randomised (1)':>16}")
   for k, label, fmt in [("pushes", "push events", "{:.0f}"),
                         ("dv_push", "|dv| on push step", "{:.3f}"), ("dv_calm", "|dv| other steps", "{:.3f}"),
@@ -126,14 +130,15 @@ def main():
     print(f"  {label:<20}{fa:>14}{fb:>16}")
   print(f"(first run incl. compile: {t_compile:.0f}s)")
 
-  lat = float(np.mean(d["latency"]))
+  lat = float(np.mean(d["latency"] > 0))
   checks = {
       "level 0 is the nominal robot": bool(np.allclose(nominal["dr"]["friction"], 1.0)
                                           and np.allclose(nominal["dr"]["kp_scale"], 1.0)
                                           and not np.any(nominal["dr"]["latency"])),
       "level 1 parameters vary across robots": bool(np.std(d["friction"]) > 0.05
                                                      and np.std(d["payload"]) > 0.3),
-      "latency in ~half the episodes": abs(lat - cfg.dr.latency_prob) < 0.15,
+      "latency in the configured share of episodes": abs(lat - sum(cfg.dr.latency_probs)) < 0.15,
+      "slopes within the configured maximum": bool(tilt.max() <= cfg.dr.slope_max_deg + 1e-3),
       "no pushes at level 0 (zero kick)": nominal["dv_push"] != nominal["dv_push"]
       or nominal["dv_push"] < 2 * nominal["dv_calm"] + 0.05,
       "pushes change base velocity at level 1": full["pushes"] > 0

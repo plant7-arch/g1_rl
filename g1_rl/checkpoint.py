@@ -126,6 +126,8 @@ def export_policy(path: str, ts, env, ppo_cfg, extra_meta: dict | None = None) -
       "activation": ppo_cfg.activation,
       "obs_clip": ppo_cfg.obs_clip,
       "obs_size": env.obs_size,
+      "frame_size": int(getattr(env, "frame_size", env.obs_size)),  # v0.9: obs = history x frame
+      "history": int(getattr(env, "history", 1)),
       "action_size": env.action_size,
       "obs_layout": layout,
       "action_scale": [float(x) for x in env.action_scale],  # per joint (a scalar before v0.8)
@@ -134,8 +136,9 @@ def export_policy(path: str, ts, env, ppo_cfg, extra_meta: dict | None = None) -
       "gait_freq_range": list(env.cfg.gait_freq),
       "iteration": int(jax.device_get(ts.iteration)),
       "action_mapping": "target = clip(home_ctrl + action_scale * clip(action, -1, 1), ctrl_lo, ctrl_hi)",
-      "observation": ("[gyro(3), gravity_body(3), command(3), joint_pos-home(29), joint_vel(29), "
-                      "last_action(29), cos(phase)(2), sin(phase)(2)]; joint order = joint_names"),
+      "observation": ("frame = [gyro(3), gravity_body(3), command(3), joint_pos-home(29), joint_vel(29), "
+                      "last_action(29), cos(phase)(2), sin(phase)(2)]; joint order = joint_names; "
+                      "obs = the last `history` frames concatenated, newest first; obs_layout = one frame"),
   }
   meta.update(extra_meta or {})
   _atomic_savez(path, arrays, meta)

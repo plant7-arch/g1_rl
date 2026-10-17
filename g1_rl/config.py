@@ -47,8 +47,12 @@ class CommandConfig:
   lin_vel_x: tuple = (-0.6, 1.0)  # m/s, forward
   lin_vel_y: tuple = (-0.5, 0.5)  # m/s, left
   ang_vel_z: tuple = (-1.0, 1.0)  # rad/s, yaw
-  zero_prob: float = 0.1  # fraction of commands that are "stand still"
-  deadband: float = 0.1  # |component| below this is snapped to 0
+  zero_prob: float = 0.2  # fraction of commands that are "stand still" (v0.9: 0.1 -> 0.2)
+  deadband: float = 0.05  # |component| below this is snapped to 0 (v0.9: 0.1 -> 0.05)
+  # (v0.9) Fraction of commands drawn from the small range below, so slow walking and
+  # slow turning are practised (v3 stood still for commands under ~0.2 m/s, 0.3 rad/s).
+  small_prob: float = 0.2
+  small_range: tuple = (0.3, 0.3, 0.4)  # |vx|, |vy| (m/s), |wz| (rad/s) for small commands
   resample_steps: tuple = (250, 500)  # resample every 5-10 s (at 50 Hz)
 
 
@@ -57,7 +61,7 @@ def _default_weights():
   # 1.0 held for a whole 20 s episode adds 20 to the return. Positive = reward.
   return {
       # task
-      "tracking_lin_vel": 1.5,  # exp(-|v_xy_cmd - v_xy|^2 / sigma), heading frame
+      "tracking_lin_vel": 1.5,  # exp(-|v_xy_cmd - v_xy|^2 / tracking_sigma), heading frame
       "tracking_ang_vel": 1.0,  # (v0.7: was 0.75) exp(-(wz_cmd - wz)^2 / sigma)
       "alive": 0.25,
       # gait shaping (uses the gait clock the policy observes)
@@ -66,7 +70,8 @@ def _default_weights():
       "feet_air_time": 1.0,  # reward steps of a reasonable duration (on touchdown)
       "feet_slip": -0.25,  # horizontal speed of feet in contact
       "feet_flat": -2.0,  # tilted soles while in contact
-      "feet_distance": -10.0,  # feet closer than min_feet_distance (sideways)
+      "feet_distance": -30.0,  # feet closer than min_feet_distance (sideways; v0.9: -10 -> -30)
+      "self_collision": -1.0,  # (v0.9) robot-robot contact pairs in penetration (legs, arms/torso)
       # base stability
       "lin_vel_z": -1.0,
       "ang_vel_xy": -0.05,
@@ -103,7 +108,10 @@ def _default_pose_weights():
 class RewardConfig:
   weights: dict = dataclasses.field(default_factory=_default_weights)
   pose_weights: dict = dataclasses.field(default_factory=_default_pose_weights)
-  tracking_sigma: float = 0.25
+  # (v0.9: 0.25 -> 0.1) A tighter tracking kernel: with 0.25, standing still when asked for
+  # 0.15 m/s still earned 91 % of the tracking reward, so the policy ignored small commands.
+  tracking_sigma: float = 0.1
+  tracking_ang_sigma: float = 0.1
   base_height_target: float = 0.74  # m, pelvis; the bent-knee pose stands at ~0.74-0.75
   swing_height: float = 0.08  # m, peak foot clearance commanded by the gait clock
   feet_phase_sigma: float = 0.005
@@ -126,17 +134,26 @@ class DomainRandConfig:
   state (info["dr_level"]) so the trainer can raise it as a curriculum.
   """
   level: float = 1.0  # initial level for reset()
-  friction: tuple = (0.4, 1.0)  # absolute sliding friction of every floor contact (nominal 1.0)
+  friction: tuple = (0.3, 1.2)  # absolute sliding friction of every floor contact (nominal 1.0)
   link_mass_scale: tuple = (0.9, 1.1)  # per body, inertia scaled with it
-  torso_payload: tuple = (-1.0, 3.0)  # kg added to torso_link (nominal 33 kg robot)
+  torso_payload: tuple = (-1.0, 8.0)  # kg added to torso_link (nominal 33 kg robot)
   torso_com_offset: float = 0.03  # m, uniform per axis
-  kp_scale: tuple = (0.9, 1.1)  # per actuator
-  kd_scale: tuple = (0.8, 1.2)  # per actuator
+  kp_scale: tuple = (0.75, 1.25)  # per actuator (v0.9: 0.9-1.1; v3 fell at x0.7)
+  kd_scale: tuple = (0.7, 1.3)  # per actuator
   frictionloss_scale: tuple = (0.5, 2.0)  # per joint (nominal 0.1 Nm)
   armature_scale: tuple = (0.95, 1.05)  # per joint (motor reflected inertia)
-  latency_prob: float = 0.5  # chance an episode applies each action one control step late
+  # Action latency per episode: probability of 1 and of 2 control steps (20 / 40 ms) late.
+  latency_probs: tuple = (0.4, 0.2)
   push_interval: tuple = (5.0, 10.0)  # s between pushes
-  push_velocity: tuple = (0.1, 0.6)  # m/s, horizontal base velocity kick, random direction
+  push_velocity: tuple = (0.1, 1.0)  # m/s, horizontal base velocity kick, random direction (v0.9: max 0.6)
+  # --- (v0.9) slopes and sensor imperfections -------------------------------------
+  # A slope is simulated by tilting gravity: physically the same as an endless incline,
+  # and the flat-floor contact and foot-height code stays exact in the floor's frame.
+  slope_prob: float = 0.6  # fraction of episodes on a slope (the rest are flat)
+  slope_max_deg: float = 10.0  # tilt uniform in [0, max], random direction
+  imu_tilt_deg: float = 2.5  # IMU mounting error per axis (roll, pitch), policy obs only
+  gyro_bias: float = 0.1  # rad/s per axis, policy obs only
+  joint_offset: float = 0.03  # rad per joint (encoder calibration), policy obs only
 
 
 @dataclasses.dataclass(frozen=True)
@@ -153,6 +170,9 @@ class EnvConfig:
   action_scale_overrides: dict = dataclasses.field(
       default_factory=lambda: {"shoulder": 0.25, "elbow": 0.25, "wrist": 0.25})
   gait_freq: tuple = (1.25, 1.5)  # Hz, sampled per episode
+  # (v0.9) Policy observation = the last `obs_history` frames, newest first, so the policy
+  # can infer its velocity (v3, with one frame, could not: it walked off on slopes).
+  obs_history: int = 5
   # Reset distribution
   init_joint_noise: float = 0.05  # rad, uniform
   init_base_vel_noise: float = 0.1  # m/s and rad/s, uniform
@@ -170,7 +190,7 @@ class PPOConfig:
   # data per iteration = num_envs * unroll_length (8192 * 24 = 196,608 env steps)
   num_envs: int = 8192
   unroll_length: int = 24
-  total_env_steps: float = 250e6
+  total_env_steps: float = 350e6  # v0.9: 250M -> 350M (harder task: slopes, history); ~7 h on 2xT4
   # optimisation (rsl_rl-style; reference values used for legged robots)
   num_epochs: int = 5
   num_minibatches: int = 4
@@ -199,7 +219,7 @@ class PPOConfig:
   # domain-randomisation curriculum (level 0 = nominal robot, 1 = full ranges)
   dr_level_start: float = 0.0
   dr_level_step: float = 0.02  # added after each iteration that meets both criteria below
-  curriculum_tracking: float = 0.6  # tracking_lin_vel reward >= this fraction of its max
+  curriculum_tracking: float = 0.45  # tracking_lin_vel reward >= this fraction of its max (sigma 0.1 since v0.9)
   curriculum_survival_steps: float = 800.0  # falls rarer than once per this many env steps
   # bookkeeping
   seed: int = 0

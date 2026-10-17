@@ -40,6 +40,7 @@ class RewardInputs(NamedTuple):
   air_time: jax.Array  # (2,) seconds in the air, including this step
   phase: jax.Array  # (2,) gait clock per foot in [-pi, pi); swing when sin > 0
   feet_lateral_distance: jax.Array  # () sideways distance between feet, heading frame
+  self_contacts: jax.Array  # () robot-robot contact pairs in penetration
   fell: jax.Array  # () bool
 
 
@@ -88,7 +89,7 @@ def _tracking_lin_vel(i, c, cfg):
 
 
 def _tracking_ang_vel(i, c, cfg):
-  return jnp.exp(-jnp.square(i.command[2] - i.ang_vel[2]) / cfg.tracking_sigma)
+  return jnp.exp(-jnp.square(i.command[2] - i.ang_vel[2]) / cfg.tracking_ang_sigma)
 
 
 def _alive(i, c, cfg):
@@ -127,6 +128,10 @@ def _feet_flat(i, c, cfg):
 
 def _feet_distance(i, c, cfg):
   return jnp.maximum(cfg.min_feet_distance - i.feet_lateral_distance, 0.0)
+
+
+def _self_collision(i, c, cfg):
+  return i.self_contacts
 
 
 # --- base -----------------------------------------------------------------------
@@ -193,7 +198,8 @@ TERMS = {
     "tracking_lin_vel": _tracking_lin_vel, "tracking_ang_vel": _tracking_ang_vel,
     "alive": _alive, "feet_phase": _feet_phase, "gait_contact": _gait_contact,
     "feet_air_time": _feet_air_time, "feet_slip": _feet_slip, "feet_flat": _feet_flat,
-    "feet_distance": _feet_distance, "lin_vel_z": _lin_vel_z, "ang_vel_xy": _ang_vel_xy,
+    "feet_distance": _feet_distance, "self_collision": _self_collision,
+    "lin_vel_z": _lin_vel_z, "ang_vel_xy": _ang_vel_xy,
     "orientation": _orientation, "base_height": _base_height, "pose": _pose,
     "stand_still": _stand_still, "arm_still": _arm_still, "joint_limits": _joint_limits,
     "joint_vel": _joint_vel,

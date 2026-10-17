@@ -23,6 +23,15 @@ CHECKS = [
      lambda s, x: _s2s_survival(x, "training_model_cpu"), ">=", 1.0),
     ("Sim-to-sim (full mesh model): all scenarios survived",
      lambda s, x: _s2s_survival(x, "full_model"), ">=", 1.0),
+    # v0.9: the weak spots found in the v3 test campaign
+    ("Slopes up to 6 deg (up, down, across): survival", lambda s, x: _get(s, "slope_summary", "survival_le6"),
+     ">=", 1.0),
+    ("Standing on slopes up to 6 deg: drift speed (m/s)", lambda s, x: _get(s, "slope_summary", "stand_drift_le6"),
+     "<=", 0.15),
+    ("IMU mounted 3 deg off: standing drift speed (m/s)", lambda s, x: _get(s, "imu_summary", "stand_drift"),
+     "<=", 0.15),
+    ("Small commands (0.15-0.2 m/s, 0.2-0.3 rad/s): mean fraction achieved",
+     lambda s, x: _get(s, "small_summary", "mean_fraction"), ">=", 0.6),
 ]
 
 
@@ -116,10 +125,23 @@ def _markdown(meta, chk, s, x) -> str:
     for cmd in ("stand", "walk"):
       L.append(f"| {cmd} | " + " | ".join(_fmt(s["push"].get(f"{cmd}/{d}", {}).get("max_recovered_mps"))
                                           for d in ("front", "back", "left", "right")) + " |")
+  if s and "slope" in s:
+    L += ["", "## Slopes (gravity tilted; robot faces +x): survived / speed error (m/s)", "",
+          "| slope | standing | walking 0.5 m/s |", "|---|---|---|"]
+    for k, v in s["slope"].items():
+      cell = lambda c: (f"{_fmt(v[c]['survived'])} / {_fmt(v[c]['lin_vel_err'])}" if c in v else "–")
+      L.append(f"| {k} | {cell('stand')} | {cell('walk')} |")
+  if s and "imu" in s:
+    L += ["", "## IMU mounted 3 deg off: survived / speed error (m/s)", ""]
+    L += [f"- {k}: {_fmt(v['survived'])} / {_fmt(v['lin_vel_err'])}" for k, v in s["imu"].items()]
+  if s and "small" in s:
+    L += ["", "## Small commands: commanded → achieved (fraction)", ""]
+    L += [f"- {k}: {_fmt(v['command'])} → {_fmt(v['achieved'])} ({_fmt(v['fraction'])})"
+          for k, v in s["small"].items()]
   if s and "ood" in s:
     L += ["", "## Beyond the training ranges, walking 0.5 m/s: survival (tracking error m/s)", ""]
-    train_rng = {"friction": "0.4–1.0", "payload": "−1–3 kg", "kp_scale": "0.9–1.1", "kd_scale": "0.8–1.2",
-                 "com_offset_x": "±0.03 m", "frictionloss_scale": "0.5–2", "latency": "0–1 step"}
+    train_rng = {"friction": "0.3–1.2", "payload": "−1–8 kg", "kp_scale": "0.75–1.25", "kd_scale": "0.7–1.3",
+                 "com_offset_x": "±0.03 m", "frictionloss_scale": "0.5–2", "latency": "0–2 steps"}
     for p, vals in s["ood"].items():
       cells = ", ".join(f"{v}: {_fmt(r['survival'])} ({_fmt(r['lin_vel_err'])})" for v, r in vals.items())
       L.append(f"- **{p}** (trained {train_rng.get(p, '?')}): {cells}")

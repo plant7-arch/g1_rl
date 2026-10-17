@@ -9,7 +9,7 @@ Three equivalent forms of the same deterministic controller (obs -> action):
                              enough to drive the robot
   numpy_forward()            a 10-line NumPy reference used to check the other two
 
-ONNX graph (opset 17), input "obs" (batch, 100) float32, two outputs:
+ONNX graph (opset 17), input "obs" (batch, obs_size) float32 (v0.9: 5 stacked frames x 100), two outputs:
   action        = clip(MLP(clip((obs - mean) / std, -c, c)), -1, 1)
   joint_targets = min(max(home + action_scale * action, ctrl_lo), ctrl_hi)   # PD targets, rad
 
@@ -212,7 +212,8 @@ python run_mujoco.py --xml <menagerie>/unitree_g1/scene.xml --cmd 0.5 0 0 --seco
 
 ## Interface (50 Hz)
 
-Input `obs` (batch, {obs_size}) float32, in this order:
+Input `obs` (batch, {obs_size}) float32 = the last {history} observation frames concatenated,
+newest first (at the first step, repeat the first frame). One frame ({frame_size} values):
 {layout}
 
 * gyro: base angular velocity in the body frame (rad/s); gravity: unit gravity vector in the body frame
@@ -264,5 +265,6 @@ def export_bundle(policy_npz: str, out_dir: str, include_model: str | None = Non
     f.write(DEPLOY_README.format(
         version=g1_rl.__version__, source=os.path.basename(policy_npz), iteration=meta.get("iteration"),
         steps=(meta.get("env_steps") or 0) / 1e6, obs_size=meta["obs_size"], layout=layout,
+        history=int(meta.get("history", 1)), frame_size=int(meta.get("frame_size", meta["obs_size"])),
         gait_freq=float(np.mean(meta.get("gait_freq_range", [1.25, 1.5]))), scale=_scale_text(meta)))
   return info
