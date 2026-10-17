@@ -51,6 +51,7 @@ g1_rl/
   sim2sim.py       independent CPU MuJoCo runner (training model + full mesh model)
   report.py        readiness checks, report.md/json, eval_summary.png
   export.py        ONNX export, NumPy reference, OnnxPolicy, deployment bundle
+  symmetry.py      left-right mirror maps for joints / observations (mirror loss)
 deploy/
   run_mujoco.py    standalone runner for policy.onnx (numpy + mujoco + onnxruntime only)
 scripts/
@@ -83,14 +84,14 @@ Use `--platform cpu` on any script to force CPU.
 Each delivered package bumps `__version__` in `g1_rl/__init__.py`. On your
 computer, `update_from_zip.sh -m "..." g1_rl_x_y_z.zip` commits it as one commit tagged
 `v<version>` and pushes it. On Kaggle, the first notebook cell clones that tag
-(`GIT_REF = "v0.7.0"`) or `main`. Run outputs (`outputs/`, checkpoints) are
+(`GIT_REF = "v0.8.0"`) or `main`. Run outputs (`outputs/`, checkpoints) are
 git-ignored.
 
 ## Environment (Phase 1)
 
 | | |
 |---|---|
-| Control | 50 Hz, 5 physics substeps of 4 ms. Action a ∈ [-1,1]^29 → PD target `home + 0.5·a` (clipped to joint range) |
+| Control | 50 Hz, 5 physics substeps of 4 ms. Action a ∈ [-1,1]^29 → PD target `home + s·a` (clipped to joint range); s = 0.5 rad for legs and waist, 0.25 rad for arms (v0.8, `action_scale_overrides`) |
 | Policy obs (100) | gyro, gravity in body frame, command (vx, vy, ωz), joint pos − home, joint vel, last action, gait clock cos/sin (2 feet). Uniform noise |
 | Critic obs (205) | clean policy obs + base linear velocity, pelvis height, foot contact, foot height, foot air time, actuator torque / limit, this episode's randomisation (friction, payload, CoM offset, kp/kd scales, latency, recent push) |
 | Commands | vx ∈ [−0.6, 1.0] m/s, vy ∈ [−0.5, 0.5] m/s, ωz ∈ [−1, 1] rad/s; 10 % stand-still; resampled every 5–10 s |
@@ -118,17 +119,18 @@ Per step: `r = max(Σ wᵢ·termᵢ·dt, 0) + w_term·fell·dt` (dt = 0.02 s). W
 | | feet_flat | −2 | 1 − cos(sole tilt) for feet in contact |
 | | feet_distance | −10 | feet closer than 15 cm sideways (they stand 24 cm apart) |
 | Base | lin_vel_z / ang_vel_xy / orientation / base_height | −1 / −0.05 / −2 / −10 | bouncing, wobbling, leaning, pelvis away from 0.74 m |
-| Posture | pose | −0.5 | per-joint weighted (q − q_home)²: free hips/knees/arm swing, stiff hip roll/yaw, waist, wrists |
+| Posture | pose | −0.5 | per-joint weighted (q − q_home)²: free hips/knees, light arm swing (0.2), stiff hip roll/yaw, waist, wrists |
 | | stand_still | −0.2 | Σ\|q − q_home\| when standing (*) |
+| | arm_still | −1 | Σ (q − q_home)² over shoulder/elbow/wrist joints when standing (*) (v0.8) |
 | | joint_limits | −5 | beyond 95 % of each joint range |
 | Effort | joint_vel / joint_acc / torques / energy / action_rate | −1e−3 / −2.5e−7 / −1e−5 / −1e−4 / −0.05 | regularisation |
 | Failure | termination | −50 | on a fall, added after the clip (−1.0 per fall) |
 
 (*) "Standing" = zero command **and** base slower than 0.25 m/s (`stand_recovery_speed`,
 v0.7). If a standing robot is pushed and starts sliding, the feet follow the gait clock
-and stand_still is off, so a recovery step is rewarded instead of penalised. The first
-run (g1_walk_v1, v0.6) recovered from ≥1 m/s pushes while walking but only ~0.5 m/s
-while standing, because standing required both feet down.
+and stand_still is off, so a recovery step is rewarded instead of penalised. (Measured
+over 24 pushes per strength this changed little: g1_walk_v1 already stepped after
+pushes and survived 0.5 m/s standing pushes 96 % of the time.)
 
 The reward uses the command the action was chosen for, so a command change does not
 mis-credit the step on which it happens.
@@ -173,6 +175,8 @@ python scripts/plot_metrics.py outputs/runs/<run> --show-terms
 | Multi-GPU | envs split across GPUs; minibatches drawn within each GPU's samples (no shuffling traffic); gradients all-reduced |
 | Curriculum | randomisation level starts at 0 and rises by 0.02 per iteration while velocity tracking ≥ 60 % of max and falls are rarer than 1 per 800 steps |
 | Time-outs | 20 s time limits bootstrap from V(s) (not treated as failures) |
+| Bound loss (v0.8) | 0.5 · Σ relu(\|μ\| − 1)² : the env clips actions to [−1, 1], so without it a mean that drifts past a bound gets no gradient back and stays saturated (logged: `loss/bound`, `policy/saturated`) |
+| Mirror loss (v0.8) | 1.0 · ‖μ(M_o·o) − M_a·μ(o)‖²: the policy must act on the left-right mirrored observation with the mirrored action (`symmetry.py`; roll/yaw joints and lateral quantities change sign, left/right swap, the feet swap gait clocks). Gives symmetric gaits; logged as `loss/symmetry` |
 
 Outputs in `outputs/runs/<run>/`: `metrics.jsonl` (every iteration), `ckpt/` (last 3
 full states), `policy_latest.npz`/`policy_final.npz` (+ `.json`), `video_walk_forward.mp4`,
@@ -211,6 +215,14 @@ iterations, joint friction 3× training nominal; PD gains set to the policy's).
 
 Output: `report.md` with ✅/❌ readiness checks and tables, `report.json`, `eval_summary.png`,
 videos (`mjx_forward_0p5.mp4`, `full_model_forward_0p5.mp4`, `full_model_walk_push_left_0p5.mp4`).
+
+## Policy refinements after the first runs (v0.8)
+
+g1_walk_v1 and v2 held the right arm back and straight while standing (shoulder pitch and
+elbow outputs pinned at +1, the action limit). Causes: the arm posture weight was low, the
+clipped action gave no gradient back once the mean passed +1, and nothing asked for
+left-right symmetry (both runs used seed 0, so the same quirk). v0.8 adds the bound loss,
+the mirror loss, a 0.25 rad action range for the arms and the `arm_still` reward.
 
 ## Export (Phase 6)
 

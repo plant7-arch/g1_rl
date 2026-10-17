@@ -104,7 +104,7 @@ def test_step_cases(setup):
   assert np.isfinite(out.obs).all() and np.isfinite(out.reward).all()
 
   # --- randomisation --------------------------------------------------------
-  home, scale = env.robot.home_ctrl, env.cfg.action_scale
+  home, scale = env.robot.home_ctrl, env.action_scale
   lo, hi = env.robot.ctrl_lo, env.robot.ctrl_hi
   np.testing.assert_allclose(out.info["motor_targets"][1], np.clip(home + scale * 0.4, lo, hi),
                              atol=1e-6)  # late episode: previous action applied

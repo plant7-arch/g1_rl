@@ -25,7 +25,8 @@ PANELS = [
     ("Throughput (env steps / s)", ["sps"]),
     ("KL and learning rate", ["train/kl", "train/lr"]),
     ("Policy std / value explained var.", ["policy/std", "value/explained_var"]),
-    ("Losses", ["loss/policy", "loss/value"]),
+    ("Losses (bound / symmetry: v0.8)", ["loss/policy", "loss/value", "loss/bound", "loss/symmetry",
+                                         "policy/saturated"]),
 ]
 
 

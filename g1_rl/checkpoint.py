@@ -128,7 +128,7 @@ def export_policy(path: str, ts, env, ppo_cfg, extra_meta: dict | None = None) -
       "obs_size": env.obs_size,
       "action_size": env.action_size,
       "obs_layout": layout,
-      "action_scale": env.cfg.action_scale,
+      "action_scale": [float(x) for x in env.action_scale],  # per joint (a scalar before v0.8)
       "ctrl_dt": env.dt,
       "joint_names": list(r.actuator_names),
       "gait_freq_range": list(env.cfg.gait_freq),

@@ -158,3 +158,38 @@ def test_adaptive_lr():
   assert float(ppo.adapt_lr(lr, jnp.asarray(0.001), CFG)) == pytest.approx(1.5e-3)
   assert float(ppo.adapt_lr(lr, jnp.asarray(0.01), CFG)) == pytest.approx(1e-3)
   assert float(ppo.adapt_lr(jnp.asarray(1e-5), jnp.asarray(1.0), CFG)) == pytest.approx(1e-5)
+
+
+def test_bound_and_symmetry_losses():
+  """Bound loss = sum over action dims of (|mean| - 1)^2 beyond the bounds; symmetry
+  loss = |mu(mirror(obs)) - mirror(mu(obs))|^2, zero for a policy that is equivariant."""
+  cfg = dataclasses.replace(CFG, policy_hidden=(16,), value_hidden=(16,))
+  params = nets.init_actor_critic(jax.random.PRNGKey(0), 4, 4, 3, (16,), (16,), 0.6)
+  stats = norm.init(4)
+  mb, _ = _toy_batch(jax.random.PRNGKey(1), params, stats, cfg)
+  old_ls = params["policy"]["log_std"]
+  net = [dict(l) for l in params["policy"]["net"]]
+  net[-1]["w"] = jnp.zeros_like(net[-1]["w"])
+  net[-1]["b"] = jnp.array([2.0, -1.5, 0.5])  # mean = (2, -1.5, 0.5) everywhere
+  p2 = {**params, "policy": {**params["policy"], "net": net}}
+  _, aux = ppo.ppo_loss(p2, mb, stats, stats, old_ls, cfg)
+  assert float(aux["loss/bound"]) == pytest.approx(1.0 + 0.25, rel=1e-5)
+  assert float(aux["policy/saturated"]) == pytest.approx(2 / 3, rel=1e-5)
+  # Gradient of the bound loss pulls the out-of-range means back inside.
+  g = jax.grad(lambda p: ppo.ppo_loss(p, mb, stats, stats, old_ls,
+                                     dataclasses.replace(cfg, value_coef=0, entropy_coef=0))[0])(p2)
+  gb = g["policy"]["net"][-1]["b"]
+  assert float(gb[0]) > 0 and float(gb[1]) < 0  # descent lowers mean 0, raises mean 1
+
+  ident = (jnp.arange(4), jnp.ones(4), jnp.arange(3), jnp.ones(3))
+  _, aux = ppo.ppo_loss(params, mb, stats, stats, old_ls, cfg, mirror=ident)
+  assert float(aux["loss/symmetry"]) == pytest.approx(0.0, abs=1e-10)
+  swap = (jnp.array([1, 0, 2, 3]), jnp.array([1.0, 1.0, -1.0, 1.0]), jnp.array([1, 0, 2]),
+          jnp.array([1.0, 1.0, -1.0]))
+  _, aux = ppo.ppo_loss(params, mb, stats, stats, old_ls, cfg, mirror=swap)
+  obs_n = norm.normalize(stats, mb["obs"], cfg.obs_clip)
+  mu = nets.policy_dist(params["policy"], obs_n, cfg.activation)[0]
+  mu_m = nets.policy_dist(params["policy"], norm.normalize(stats, mb["obs"][:, swap[0]] * swap[1],
+                                                           cfg.obs_clip), cfg.activation)[0]
+  want = jnp.square(mu_m - mu[:, swap[2]] * swap[3]).sum(-1).mean()
+  assert float(aux["loss/symmetry"]) == pytest.approx(float(want), rel=1e-5) and float(want) > 0

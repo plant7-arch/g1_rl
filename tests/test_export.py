@@ -75,10 +75,12 @@ def test_same_closed_loop_in_mujoco(bundle):
   runs = [MujocoRunner(xml, p) for p in (pi, op)]
   for r in runs:
     r.reset(command=(0.3, 0.0, 0.0))
+  # Float32 rounding differences (~1e-6) grow under this saturating random policy, so a
+  # loose tolerance; a wrong mapping (order, scale, normaliser) gives errors of ~0.1-1.
   for _ in range(5):
     acts = [r.step() for r in runs]
-    np.testing.assert_allclose(acts[0], acts[1], atol=1e-4)
-  np.testing.assert_allclose(runs[0].d.qpos, runs[1].d.qpos, atol=1e-4)
+    np.testing.assert_allclose(acts[0], acts[1], atol=1e-3)
+  np.testing.assert_allclose(runs[0].d.qpos, runs[1].d.qpos, atol=1e-3)
 
 
 def test_standalone_runner(bundle):

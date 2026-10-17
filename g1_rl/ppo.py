@@ -26,7 +26,7 @@ from jax.sharding import NamedSharding, PartitionSpec as P
 
 from g1_rl import networks as nets
 from g1_rl import normalizer as norm
-from g1_rl import optim
+from g1_rl import optim, symmetry
 from g1_rl.config import PPOConfig
 from g1_rl.parallel import AXIS
 
@@ -78,7 +78,8 @@ def compute_gae(rewards, values, dones, truncations, gamma, lam):
 
 
 # ------------------------------------------------------------------------ loss
-def ppo_loss(params, mb, obs_stats, priv_stats, old_log_std, cfg: PPOConfig):
+def ppo_loss(params, mb, obs_stats, priv_stats, old_log_std, cfg: PPOConfig, mirror=None):
+  """`mirror` = (obs_perm, obs_sign, act_perm, act_sign) enables the symmetry loss."""
   obs_n = norm.normalize(obs_stats, mb["obs"], cfg.obs_clip)
   priv_n = norm.normalize(priv_stats, mb["priv"], cfg.obs_clip)
   mean, log_std = nets.policy_dist(params["policy"], obs_n, cfg.activation)
@@ -94,10 +95,23 @@ def ppo_loss(params, mb, obs_stats, priv_stats, old_log_std, cfg: PPOConfig):
   value_loss = jnp.maximum(jnp.square(v - mb["ret"]), jnp.square(v_clip - mb["ret"])).mean()
 
   ent = nets.entropy(log_std).mean()
-  loss = policy_loss + cfg.value_coef * value_loss - cfg.entropy_coef * ent
+  # Actions are clipped to [-1, 1] by the env, so a mean beyond a bound gets no
+  # gradient back from the surrogate: pull it back explicitly.
+  bound_loss = jnp.square(jax.nn.relu(jnp.abs(mean) - 1.0)).sum(-1).mean()
+  loss = (policy_loss + cfg.value_coef * value_loss - cfg.entropy_coef * ent
+          + cfg.bound_coef * bound_loss)
+  aux_sym = {}
+  if mirror is not None and cfg.symmetry_coef > 0:
+    op, os_, ap, as_ = mirror
+    obs_m = norm.normalize(obs_stats, mb["obs"][..., op] * os_, cfg.obs_clip)
+    mean_m, _ = nets.policy_dist(params["policy"], obs_m, cfg.activation)
+    sym_loss = jnp.square(mean_m - mean[..., ap] * as_).sum(-1).mean()
+    loss = loss + cfg.symmetry_coef * sym_loss
+    aux_sym["loss/symmetry"] = sym_loss
   kl = nets.kl_divergence(mb["mean"], jnp.broadcast_to(old_log_std, mean.shape), mean, log_std).mean()
   aux = {"loss/policy": policy_loss, "loss/value": value_loss, "loss/entropy": ent,
-         "train/kl": kl, "train/clip_frac": (jnp.abs(ratio - 1) > cfg.clip_eps).mean()}
+         "loss/bound": bound_loss, "policy/saturated": (jnp.abs(mean) > 1.0).mean(),
+         "train/kl": kl, "train/clip_frac": (jnp.abs(ratio - 1) > cfg.clip_eps).mean(), **aux_sym}
   return loss, aux
 
 
@@ -109,10 +123,10 @@ def adapt_lr(lr, kl, cfg: PPOConfig):
   return jnp.where((kl < cfg.desired_kl / 2) & (kl > 0), jnp.minimum(lr * 1.5, hi), lr)
 
 
-def gradient_step(carry, mb, obs_stats, priv_stats, old_log_std, cfg):
+def gradient_step(carry, mb, obs_stats, priv_stats, old_log_std, cfg, mirror=None):
   params, opt, lr = carry
   (_, aux), grads = jax.value_and_grad(ppo_loss, has_aux=True)(
-      params, mb, obs_stats, priv_stats, old_log_std, cfg)
+      params, mb, obs_stats, priv_stats, old_log_std, cfg, mirror)
   grads, gnorm = optim.clip_by_global_norm(grads, cfg.max_grad_norm)
   lr = adapt_lr(lr, aux["train/kl"], cfg)  # rsl_rl: adapt on the KL measured before the step
   params, opt = optim.adam_update(params, grads, opt, lr)
@@ -162,6 +176,9 @@ def make_train_step(env, cfg: PPOConfig, mesh):
   w_track = env.cfg.reward.weights.get("tracking_lin_vel", 0.0) * env.dt
   w_yaw = env.cfg.reward.weights.get("tracking_ang_vel", 0.0) * env.dt
   batch_spec = NamedSharding(mesh, P(AXIS))
+  mirror = None
+  if cfg.symmetry_coef > 0:
+    mirror = tuple(jnp.asarray(x) for x in symmetry.for_env(env))
 
   def train_step(ts: TrainState, env_state):
     key, k_roll, k_perm = jax.random.split(ts.key, 3)
@@ -201,7 +218,7 @@ def make_train_step(env, cfg: PPOConfig, mesh):
     # ---- optimisation -----------------------------------------------------------
     def epoch(carry, k):
       mbs = local_minibatches(k, data, n_dev, cfg.num_minibatches, mesh)
-      return lax.scan(lambda c, mb: gradient_step(c, mb, obs_stats, priv_stats, old_log_std, cfg),
+      return lax.scan(lambda c, mb: gradient_step(c, mb, obs_stats, priv_stats, old_log_std, cfg, mirror),
                       carry, mbs)
 
     (params, opt, lr), aux = lax.scan(epoch, (ts.params, ts.opt, ts.lr),

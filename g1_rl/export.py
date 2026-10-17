@@ -148,7 +148,7 @@ class OnnxPolicy:
     self.home = np.asarray(self.meta["home_ctrl"])
     self.lo, self.hi = np.asarray(self.meta["ctrl_lo"]), np.asarray(self.meta["ctrl_hi"])
     self.kp, self.kd = np.asarray(self.meta["kp"]), np.asarray(self.meta["kd"])
-    self.action_scale = float(self.meta["action_scale"])
+    self.action_scale = np.asarray(self.meta["action_scale"], np.float64)
 
   def _run(self, obs):
     x = np.asarray(obs, np.float32)
@@ -182,7 +182,7 @@ def verify(arrays, meta, onnx_path, n: int = 4096, seed: int = 0, jax_policy=Non
   ref = numpy_forward(arrays, meta, obs)
   pi = OnnxPolicy(onnx_path, providers=["CPUExecutionProvider"])
   a_onnx, t_onnx = pi._run(obs)
-  t_ref = np.clip(arrays["home_ctrl"] + meta["action_scale"] * ref, arrays["ctrl_lo"], arrays["ctrl_hi"])
+  t_ref = np.clip(arrays["home_ctrl"] + np.asarray(meta["action_scale"]) * ref, arrays["ctrl_lo"], arrays["ctrl_hi"])
   out = {"samples": n, "onnx_vs_numpy_action": float(np.abs(a_onnx - ref).max()),
          "onnx_vs_numpy_targets": float(np.abs(t_onnx - t_ref).max()),
          "saturated_fraction": float((np.abs(ref) >= 1).mean())}
@@ -222,9 +222,20 @@ Input `obs` (batch, {obs_size}) float32, in this order:
 * gait: cos, sin of two foot phases (left starts at 0, right at pi), advancing by
   2*pi*f*dt per step, f = {gait_freq} Hz
 
-Outputs: `action` in [-1, 1] and `joint_targets` (rad) = clip(home + {scale} * action, ctrl_lo, ctrl_hi),
+Outputs: `action` in [-1, 1] and `joint_targets` (rad) = clip(home + action_scale * action, ctrl_lo, ctrl_hi),
+action_scale = {scale},
 tracked by a PD loop with kp, kd from the metadata (torque = kp*(target - q) - kd*qdot).
 """
+
+
+def _scale_text(meta) -> str:
+  s = np.atleast_1d(np.asarray(meta["action_scale"], np.float64))
+  if np.all(s == s[0]):
+    return f"{s[0]:g} rad for every joint"
+  groups = {}
+  for n, v in zip(meta["joint_names"], np.broadcast_to(s, (len(meta["joint_names"]),))):
+    groups.setdefault(f"{v:g}", []).append(n.replace("_joint", ""))
+  return "; ".join(f"{v} rad: {', '.join(ns)}" for v, ns in groups.items())
 
 
 def export_bundle(policy_npz: str, out_dir: str, include_model: str | None = None,
@@ -253,5 +264,5 @@ def export_bundle(policy_npz: str, out_dir: str, include_model: str | None = Non
     f.write(DEPLOY_README.format(
         version=g1_rl.__version__, source=os.path.basename(policy_npz), iteration=meta.get("iteration"),
         steps=(meta.get("env_steps") or 0) / 1e6, obs_size=meta["obs_size"], layout=layout,
-        gait_freq=float(np.mean(meta.get("gait_freq_range", [1.25, 1.5]))), scale=meta["action_scale"]))
+        gait_freq=float(np.mean(meta.get("gait_freq_range", [1.25, 1.5]))), scale=_scale_text(meta)))
   return info

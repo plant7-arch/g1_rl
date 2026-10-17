@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "g1_rl"
-version = "0.7.0"
+version = "0.8.0"
 description = "End-to-end GPU RL pipeline (MJX + custom PPO) for Unitree G1 velocity-command walking"
 requires-python = ">=3.10"
 # Deliberately minimal: no flax / optax / brax / orbax. Networks, optimiser and

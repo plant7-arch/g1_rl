@@ -75,6 +75,7 @@ def _default_weights():
       # posture / regularisation
       "pose": -0.5,  # weighted deviation from the home pose (per-joint weights below)
       "stand_still": -0.2,  # joint deviation when the command is zero and the base is still
+      "arm_still": -1.0,  # (v0.8) arms (shoulder/elbow/wrist) away from home while standing
       "joint_limits": -5.0,
       "joint_vel": -1e-3,
       "joint_acc": -2.5e-7,
@@ -93,8 +94,8 @@ def _default_pose_weights():
       "hip_pitch": 0.01, "knee": 0.01, "ankle_pitch": 0.05,
       "hip_roll": 1.0, "hip_yaw": 1.0, "ankle_roll": 0.5,
       "waist_yaw": 1.0, "waist_roll": 2.0, "waist_pitch": 2.0,
-      "shoulder_pitch": 0.1, "shoulder_roll": 1.0, "shoulder_yaw": 0.5,
-      "elbow": 0.1, "wrist": 1.0,
+      "shoulder_pitch": 0.2, "shoulder_roll": 1.0, "shoulder_yaw": 0.5,  # v0.8: 0.1 -> 0.2
+      "elbow": 0.2, "wrist": 1.0,
   }
 
 
@@ -147,6 +148,10 @@ class EnvConfig:
   dr: DomainRandConfig = DomainRandConfig()
   episode_length: int = 1000  # control steps (20 s)
   action_scale: float = 0.5  # rad; target = home + scale * action, action in [-1, 1]
+  # Per-joint scale by joint-name substring (v0.8): arms get a smaller range so the
+  # policy cannot park them far from home (g1_walk_v1/v2 held one arm back at the limit).
+  action_scale_overrides: dict = dataclasses.field(
+      default_factory=lambda: {"shoulder": 0.25, "elbow": 0.25, "wrist": 0.25})
   gait_freq: tuple = (1.25, 1.5)  # Hz, sampled per episode
   # Reset distribution
   init_joint_noise: float = 0.05  # rad, uniform
@@ -186,6 +191,11 @@ class PPOConfig:
   activation: str = "elu"
   init_std: float = 0.6
   obs_clip: float = 10.0  # after normalisation
+  # (v0.8) Penalise the policy mean beyond the action bounds [-1, 1]: the env clips
+  # actions, so without this a mean that drifts past a bound gets no gradient back.
+  bound_coef: float = 0.5
+  # (v0.8) Mirror loss: |mu(mirror(obs)) - mirror(mu(obs))|^2 (see symmetry.py). 0 = off.
+  symmetry_coef: float = 1.0
   # domain-randomisation curriculum (level 0 = nominal robot, 1 = full ranges)
   dr_level_start: float = 0.0
   dr_level_step: float = 0.02  # added after each iteration that meets both criteria below

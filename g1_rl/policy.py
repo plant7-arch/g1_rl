@@ -35,7 +35,7 @@ class Policy:
     self.home = np.asarray(arrays["home_ctrl"])
     self.lo, self.hi = np.asarray(arrays["ctrl_lo"]), np.asarray(arrays["ctrl_hi"])
     self.kp, self.kd = np.asarray(arrays["kp"]), np.asarray(arrays["kd"])
-    self.action_scale = float(meta["action_scale"])
+    self.action_scale = np.asarray(meta["action_scale"], np.float64)  # per joint, or scalar (< v0.8)
     act, clip = meta["activation"], float(meta["obs_clip"])
 
     def forward(layers, mean, var, obs):

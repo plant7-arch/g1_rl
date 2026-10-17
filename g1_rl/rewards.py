@@ -48,7 +48,11 @@ class RewardConsts(NamedTuple):
   soft_lo: np.ndarray  # (nu,)
   soft_hi: np.ndarray  # (nu,)
   pose_weights: np.ndarray  # (nu,)
+  arm_mask: np.ndarray  # (nu,) 1 for shoulder / elbow / wrist joints
   dt: float
+
+
+ARM_JOINTS = ("shoulder", "elbow", "wrist")
 
 
 def make_consts(joint_names, home, lo, hi, cfg, dt) -> RewardConsts:
@@ -59,8 +63,9 @@ def make_consts(joint_names, home, lo, hi, cfg, dt) -> RewardConsts:
     if not hits:
       raise KeyError(f"no pose weight matches joint {n!r}")
     w[i] = hits[0]
+  arm = np.array([any(k in n for k in ARM_JOINTS) for n in joint_names], np.float32)
   return RewardConsts(np.asarray(home, np.float32), (mid - half).astype(np.float32),
-                      (mid + half).astype(np.float32), w, float(dt))
+                      (mid + half).astype(np.float32), w, arm, float(dt))
 
 
 def _moving(i):
@@ -150,6 +155,12 @@ def _stand_still(i, c, cfg):
   return jnp.sum(jnp.abs(i.joint_pos - c.home)) * (1.0 - _stepping(i, cfg))
 
 
+def _arm_still(i, c, cfg):
+  """Arms near home while standing (no command, base still). Walking leaves them to the
+  much weaker `pose` term so they can swing."""
+  return jnp.sum(c.arm_mask * jnp.square(i.joint_pos - c.home)) * (1.0 - _stepping(i, cfg))
+
+
 def _joint_limits(i, c, cfg):
   return jnp.sum(jnp.maximum(i.joint_pos - c.soft_hi, 0.0) + jnp.maximum(c.soft_lo - i.joint_pos, 0.0))
 
@@ -184,7 +195,8 @@ TERMS = {
     "feet_air_time": _feet_air_time, "feet_slip": _feet_slip, "feet_flat": _feet_flat,
     "feet_distance": _feet_distance, "lin_vel_z": _lin_vel_z, "ang_vel_xy": _ang_vel_xy,
     "orientation": _orientation, "base_height": _base_height, "pose": _pose,
-    "stand_still": _stand_still, "joint_limits": _joint_limits, "joint_vel": _joint_vel,
+    "stand_still": _stand_still, "arm_still": _arm_still, "joint_limits": _joint_limits,
+    "joint_vel": _joint_vel,
     "joint_acc": _joint_acc, "torques": _torques, "energy": _energy,
     "action_rate": _action_rate, "termination": _termination,
 }

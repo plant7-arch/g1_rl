@@ -214,3 +214,15 @@ def test_pushed_while_standing_may_step(consts):
   slow = s._replace(lin_vel=jnp.array([thr - 0.1, 0.0, 0.0]), joint_pos=s.joint_pos + 0.1)
   t_slow = terms_of(slow, consts)
   assert t_slow["stand_still"] < 0 and t_slow["feet_phase"] == pytest.approx(W["feet_phase"] * DT)
+
+
+def test_arm_still_only_arms_and_only_when_standing(consts):
+  names = robot.robot_info(robot.load_mj_model()).actuator_names
+  arm = np.array([any(k in n for k in ("shoulder", "elbow", "wrist")) for n in names])
+  s = baseline(consts, (0, 0, 0))
+  bent = s._replace(joint_pos=s.joint_pos + 0.3 * arm)
+  assert terms_of(bent, consts)["arm_still"] == pytest.approx(W["arm_still"] * 0.09 * arm.sum() * DT, rel=1e-4)
+  legs = s._replace(joint_pos=s.joint_pos + 0.3 * ~arm)
+  assert terms_of(legs, consts)["arm_still"] == 0
+  walking = baseline(consts)._replace(joint_pos=baseline(consts).joint_pos + 0.3 * arm)
+  assert terms_of(walking, consts)["arm_still"] == 0  # arms may swing while walking

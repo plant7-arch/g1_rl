@@ -48,6 +48,17 @@ def _layout(parts):
   return out
 
 
+def action_scales(joint_names, cfg: EnvConfig) -> np.ndarray:
+  """Per-joint action scale: cfg.action_scale unless a cfg.action_scale_overrides key
+  is a substring of the joint name."""
+  out = np.full(len(joint_names), cfg.action_scale, np.float32)
+  for i, n in enumerate(joint_names):
+    for k, v in cfg.action_scale_overrides.items():
+      if k in n:
+        out[i] = v
+  return out
+
+
 class State(NamedTuple):
   data: tuple  # packed mjx.Data (see sim.DataPacker)
   obs: jax.Array
@@ -89,6 +100,7 @@ class G1Env:
     self._cap_halflen = m.geom_size[caps, 1].astype(np.float32)
 
     self.action_size = r.nu
+    self.action_scale = action_scales(r.actuator_names, cfg)  # (nu,) rad per unit action
     nu = r.nu
     self.obs_layout = _layout([("gyro", 3), ("gravity", 3), ("command", 3), ("joint_pos", nu),
                                ("joint_vel", nu), ("last_act", nu), ("gait", 4)])
@@ -280,7 +292,7 @@ class G1Env:
     action = jnp.clip(action, -1.0, 1.0)
     # Latency: in "late" episodes the motors receive the previous action.
     applied = jnp.where(info["dr"]["latency"], info["last_act"], action)
-    targets = jnp.clip(self._home_u + cfg.action_scale * applied, self._lo, self._hi)
+    targets = jnp.clip(self._home_u + self.action_scale * applied, self._lo, self._hi)
 
     # Push: an instantaneous horizontal base-velocity kick every few seconds.
     info["push_timer"] = info["push_timer"] - 1
