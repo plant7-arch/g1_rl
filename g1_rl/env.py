@@ -120,6 +120,14 @@ class G1Env:
     caps = np.array([[m.geom(n).id for n in foot] for foot in FOOT_CAPSULES], np.int32)
     self._foot_caps = caps  # (2, 3)
     self._geom_body = np.asarray(m.geom_bodyid, np.int32)
+    # Self-collision pairs that do not count for the penalty: hands against hips/thighs.
+    # The training model's hand capsules are much larger than the real hand (the full mesh
+    # model shows almost no such contact), and penalising them made g1_walk_v4 hold both
+    # arms spread at the limit of their range (v1.0).
+    names = [m.body(i).name for i in range(m.nbody)]
+    hand = np.array([("wrist" in n) or ("hand" in n) or ("rubber" in n) for n in names])
+    leg = np.array([("hip" in n) or ("knee" in n) or ("thigh" in n) for n in names])
+    self._ignore_pair = (hand[:, None] & leg[None, :]) | (leg[:, None] & hand[None, :])
     self._cap_radius = m.geom_size[caps, 0].astype(np.float32)
     self._cap_halflen = m.geom_size[caps, 1].astype(np.float32)
 
@@ -255,7 +263,8 @@ class G1Env:
     g = c.geom
     valid = (g[:, 0] >= 0) & (g[:, 1] >= 0)
     body = jnp.asarray(self._geom_body)
-    robot = (body[jnp.maximum(g[:, 0], 0)] > 0) & (body[jnp.maximum(g[:, 1], 0)] > 0)
+    b1, b2 = body[jnp.maximum(g[:, 0], 0)], body[jnp.maximum(g[:, 1], 0)]
+    robot = (b1 > 0) & (b2 > 0) & ~jnp.asarray(self._ignore_pair)[b1, b2]
     return jnp.sum(valid & robot & (c.dist < 0)).astype(jnp.float32)
 
   def _reward_terms(self, d, d_prev, prev_info, phase, action, contact, first_contact,

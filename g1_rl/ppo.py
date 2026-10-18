@@ -78,8 +78,10 @@ def compute_gae(rewards, values, dones, truncations, gamma, lam):
 
 
 # ------------------------------------------------------------------------ loss
-def ppo_loss(params, mb, obs_stats, priv_stats, old_log_std, cfg: PPOConfig, mirror=None):
-  """`mirror` = (obs_perm, obs_sign, act_perm, act_sign) enables the symmetry loss."""
+def ppo_loss(params, mb, obs_stats, priv_stats, old_log_std, cfg: PPOConfig, mirror=None,
+             train_policy=True):
+  """`mirror` = (obs_perm, obs_sign, act_perm, act_sign) enables the symmetry loss.
+  `train_policy` = False trains only the critic (warm-up after a warm start)."""
   obs_n = norm.normalize(obs_stats, mb["obs"], cfg.obs_clip)
   priv_n = norm.normalize(priv_stats, mb["priv"], cfg.obs_clip)
   mean, log_std = nets.policy_dist(params["policy"], obs_n, cfg.activation)
@@ -98,15 +100,16 @@ def ppo_loss(params, mb, obs_stats, priv_stats, old_log_std, cfg: PPOConfig, mir
   # Actions are clipped to [-1, 1] by the env, so a mean beyond a bound gets no
   # gradient back from the surrogate: pull it back explicitly.
   bound_loss = jnp.square(jax.nn.relu(jnp.abs(mean) - 1.0)).sum(-1).mean()
-  loss = (policy_loss + cfg.value_coef * value_loss - cfg.entropy_coef * ent
-          + cfg.bound_coef * bound_loss)
+  pol = jnp.asarray(train_policy, jnp.float32)
+  loss = (pol * (policy_loss - cfg.entropy_coef * ent + cfg.bound_coef * bound_loss)
+          + cfg.value_coef * value_loss)
   aux_sym = {}
   if mirror is not None and cfg.symmetry_coef > 0:
     op, os_, ap, as_ = mirror
     obs_m = norm.normalize(obs_stats, mb["obs"][..., op] * os_, cfg.obs_clip)
     mean_m, _ = nets.policy_dist(params["policy"], obs_m, cfg.activation)
     sym_loss = jnp.square(mean_m - mean[..., ap] * as_).sum(-1).mean()
-    loss = loss + cfg.symmetry_coef * sym_loss
+    loss = loss + pol * cfg.symmetry_coef * sym_loss
     aux_sym["loss/symmetry"] = sym_loss
   kl = nets.kl_divergence(mb["mean"], jnp.broadcast_to(old_log_std, mean.shape), mean, log_std).mean()
   aux = {"loss/policy": policy_loss, "loss/value": value_loss, "loss/entropy": ent,
@@ -123,12 +126,13 @@ def adapt_lr(lr, kl, cfg: PPOConfig):
   return jnp.where((kl < cfg.desired_kl / 2) & (kl > 0), jnp.minimum(lr * 1.5, hi), lr)
 
 
-def gradient_step(carry, mb, obs_stats, priv_stats, old_log_std, cfg, mirror=None):
+def gradient_step(carry, mb, obs_stats, priv_stats, old_log_std, cfg, mirror=None, train_policy=True):
   params, opt, lr = carry
   (_, aux), grads = jax.value_and_grad(ppo_loss, has_aux=True)(
-      params, mb, obs_stats, priv_stats, old_log_std, cfg, mirror)
+      params, mb, obs_stats, priv_stats, old_log_std, cfg, mirror, train_policy)
   grads, gnorm = optim.clip_by_global_norm(grads, cfg.max_grad_norm)
-  lr = adapt_lr(lr, aux["train/kl"], cfg)  # rsl_rl: adapt on the KL measured before the step
+  # rsl_rl: adapt on the KL measured before the step (frozen policy: KL is 0, keep lr)
+  lr = jnp.where(jnp.asarray(train_policy), adapt_lr(lr, aux["train/kl"], cfg), lr)
   params, opt = optim.adam_update(params, grads, opt, lr)
   aux["train/grad_norm"] = gnorm
   aux["train/lr"] = lr
@@ -182,6 +186,7 @@ def make_train_step(env, cfg: PPOConfig, mesh):
 
   def train_step(ts: TrainState, env_state):
     key, k_roll, k_perm = jax.random.split(ts.key, 3)
+    train_policy = ts.iteration >= cfg.critic_warmup_iters  # warm start: critic first
     env_state = env.set_dr_level(env_state, ts.dr_level)
 
     # ---- rollout ------------------------------------------------------------
@@ -218,7 +223,8 @@ def make_train_step(env, cfg: PPOConfig, mesh):
     # ---- optimisation -----------------------------------------------------------
     def epoch(carry, k):
       mbs = local_minibatches(k, data, n_dev, cfg.num_minibatches, mesh)
-      return lax.scan(lambda c, mb: gradient_step(c, mb, obs_stats, priv_stats, old_log_std, cfg, mirror),
+      return lax.scan(lambda c, mb: gradient_step(c, mb, obs_stats, priv_stats, old_log_std, cfg, mirror,
+                                                  train_policy),
                       carry, mbs)
 
     (params, opt, lr), aux = lax.scan(epoch, (ts.params, ts.opt, ts.lr),

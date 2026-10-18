@@ -84,3 +84,35 @@ def test_train_step_moves_no_bulk_data_between_devices():
   hlo = ppo.make_train_step(env, CFG, RUNTIME.mesh).lower(ts, st).compile().as_text()
   ops = count_collectives_text(hlo)
   assert set(ops) <= {"all-reduce"}, ops
+
+
+def test_warm_start_and_critic_warmup(runs, tmp_path):
+  """v1.0: a run can start from an exported policy. The policy network and observation
+  normaliser are loaded exactly, the learning rate starts at warm_start_lr, and during
+  the critic warm-up the policy does not change."""
+  import dataclasses
+  from g1_rl import checkpoint, ppo
+  from g1_rl.env import G1Env
+  from g1_rl.trainer import warm_start
+  base, _, _ = runs
+  src = str(base / "b" / "policy_final.npz")
+  cfg = dataclasses.replace(CFG, critic_warmup_iters=2, warm_start_std=0.3, warm_start_lr=2e-4)
+  env = G1Env()
+  tmpl = ppo.init_train_state(jax.random.PRNGKey(cfg.seed), env.obs_size, env.priv_obs_size, env.action_size, cfg)
+  ts = warm_start(tmpl, src, cfg)
+  with np.load(src) as z:
+    np.testing.assert_allclose(np.asarray(ts.params["policy"]["net"][0]["w"]), z["layer0.w"])
+    np.testing.assert_allclose(np.asarray(ts.obs_stats.mean), z["obs_mean"])
+  np.testing.assert_allclose(np.exp(np.asarray(ts.params["policy"]["log_std"])), 0.3, rtol=1e-6)
+  assert float(ts.lr) == pytest.approx(2e-4)
+  # one warm-up iteration: policy frozen, critic trained
+  out = train(dataclasses.replace(cfg, total_env_steps=CFG.num_envs * CFG.unroll_length * 1),
+              str(tmp_path / "w"), RUNTIME, video=False, init_policy=src)
+  assert out["iterations_done"] == 1
+  ck = checkpoint.find_checkpoint(str(tmp_path / "w"))
+  after, _, _ = checkpoint.load_checkpoint(ck, tmpl)
+  np.testing.assert_allclose(np.asarray(after.params["policy"]["net"][0]["w"]),
+                             np.asarray(ts.params["policy"]["net"][0]["w"]), atol=1e-7)
+  assert not np.allclose(np.asarray(after.params["value"]["net"][0]["w"]),
+                         np.asarray(ts.params["value"]["net"][0]["w"]))
+  assert float(after.lr) == pytest.approx(2e-4)  # frozen policy: KL 0 must not raise the lr

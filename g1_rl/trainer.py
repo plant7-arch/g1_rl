@@ -30,6 +30,34 @@ from g1_rl.vec_env import VecEnv
 print = functools.partial(print, flush=True)  # noqa: A001
 
 
+def warm_start(ts, policy_npz: str, cfg: PPOConfig):
+  """TrainState whose policy (network + observation normaliser) comes from an exported
+  policy file; the critic, optimiser and critic normaliser stay freshly initialised."""
+  from g1_rl import networks as nets
+  from g1_rl import normalizer as norm
+  with np.load(policy_npz) as z:
+    a = {k: z[k] for k in z.files}
+  net = ts.params["policy"]["net"]
+  if len(net) != sum(k.endswith(".w") for k in a):
+    raise ValueError(f"{policy_npz}: {sum(k.endswith('.w') for k in a)} layers, expected {len(net)}")
+  new_net = []
+  for i, layer in enumerate(net):
+    w, b = a[f"layer{i}.w"], a[f"layer{i}.b"]
+    if w.shape != layer["w"].shape:
+      raise ValueError(f"{policy_npz}: layer {i} is {w.shape}, expected {layer['w'].shape} "
+                       "(observation size or network changed?)")
+    new_net.append({"w": jnp.asarray(w), "b": jnp.asarray(b)})
+  log_std = jnp.full_like(ts.params["policy"]["log_std"], np.log(cfg.warm_start_std))
+  log_std = jnp.clip(log_std, nets.LOG_STD_MIN, nets.LOG_STD_MAX)
+  params = {**ts.params, "policy": {**ts.params["policy"], "net": new_net, "log_std": log_std}}
+  # A large count keeps the loaded statistics nearly fixed: the policy was trained on them.
+  obs_stats = norm.RunningStats(jnp.asarray(a["obs_mean"]), jnp.asarray(a["obs_var"]),
+                                jnp.asarray(1e8, jnp.float32))
+  from g1_rl import optim
+  return ts._replace(params=params, opt=optim.adam_init(params), obs_stats=obs_stats,
+                     lr=jnp.asarray(cfg.warm_start_lr, jnp.float32))
+
+
 def _validate(cfg: PPOConfig, n_dev: int):
   if cfg.num_envs % n_dev:
     raise ValueError(f"num_envs={cfg.num_envs} not divisible by {n_dev} devices")
@@ -44,13 +72,16 @@ def _asdict(cfg):
 
 def train(ppo_cfg: PPOConfig, run_dir: str, rt, env_cfg: EnvConfig = EnvConfig(),
           resume: str | None = None, max_hours: float | None = None, video: bool = True,
-          stop_after: int | None = None) -> dict:
+          stop_after: int | None = None, init_policy: str | None = None) -> dict:
   """Train (or resume) a policy. Returns a summary dict.
 
   resume: run dir or checkpoint to continue from (may live in another directory,
           e.g. a previous Kaggle version's output); new files go to `run_dir`.
   max_hours: stop cleanly (with a checkpoint) before this much wall-clock time.
   stop_after: stop after this many iterations in this call (tests / smoke runs).
+  init_policy: warm start from an exported policy .npz (policy network + observation
+          normaliser; the critic starts fresh and trains alone for
+          ppo_cfg.critic_warmup_iters iterations). Ignored when resuming.
   """
   t_start = time.time()
   _validate(ppo_cfg, rt.n_devices)
@@ -59,6 +90,10 @@ def train(ppo_cfg: PPOConfig, run_dir: str, rt, env_cfg: EnvConfig = EnvConfig()
   template = ppo.init_train_state(jax.random.PRNGKey(ppo_cfg.seed), env.obs_size,
                                   env.priv_obs_size, env.action_size, ppo_cfg)
   ts, start_it = template, 0
+  if init_policy and not resume:
+    ts = warm_start(template, init_policy, ppo_cfg)
+    print(f"warm start from {init_policy}: policy + obs normaliser loaded, action std "
+          f"{ppo_cfg.warm_start_std}, critic trains alone for {ppo_cfg.critic_warmup_iters} iterations")
   if resume:
     ts, meta, path = checkpoint.load_checkpoint(resume, template)
     start_it = int(ts.iteration)
@@ -76,7 +111,7 @@ def train(ppo_cfg: PPOConfig, run_dir: str, rt, env_cfg: EnvConfig = EnvConfig()
   meta = {"g1_rl_version": g1_rl.__version__, "jax": jax.__version__, "runtime": rt.describe(),
           "ppo": _asdict(ppo_cfg), "env": _asdict(env_cfg)}
   with open(os.path.join(run_dir, "config.json"), "w") as f:
-    json.dump(dict(meta, resumed_from=resume, num_iterations=n_iters), f, indent=2)
+    json.dump(dict(meta, resumed_from=resume, warm_start=init_policy, num_iterations=n_iters), f, indent=2)
   print(f"run dir: {run_dir}\n{rt.describe()} | {ppo_cfg.num_envs} envs x {ppo_cfg.unroll_length} "
         f"steps = {ppo_cfg.batch_size:,} per iteration | {n_iters} iterations "
         f"({ppo_cfg.total_env_steps / 1e6:.0f}M steps) | obs {env.obs_size} / critic {env.priv_obs_size}")

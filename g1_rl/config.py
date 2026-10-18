@@ -175,6 +175,12 @@ class EnvConfig:
   # policy cannot park them far from home (g1_walk_v1/v2 held one arm back at the limit).
   action_scale_overrides: dict = dataclasses.field(
       default_factory=lambda: {"shoulder": 0.25, "elbow": 0.25, "wrist": 0.25})
+  # (v1.0 note) The ankle roll moves only +-0.26 rad, so with 0.5 any action beyond +-0.52 is
+  # clipped by the joint range; g1_walk_v4 kept it pinned there 70-90 % of the time. A 0.25
+  # scale was tried in the CPU verification of the warm start and cost ~18 % top speed in
+  # the short run (it changes what the warm-started policy's outputs mean), so v1.0 keeps
+  # 0.5: g1_walk_v3 (from scratch, same scale) kept only 2 % of its actions at the limit, and
+  # the bound loss (1.0) plus the std cap now stop the drift that pinned v4's ankles.
   gait_freq: tuple = (1.25, 1.5)  # Hz, sampled per episode
   # (v0.9) Policy observation = the last `obs_history` frames, newest first, so the policy
   # can infer its velocity (v3, with one frame, could not: it walked off on slopes).
@@ -196,7 +202,7 @@ class PPOConfig:
   # data per iteration = num_envs * unroll_length (8192 * 24 = 196,608 env steps)
   num_envs: int = 8192
   unroll_length: int = 24
-  total_env_steps: float = 400e6  # v0.9.1: 400M (harder task: slopes, history); ~8 h on 2xT4
+  total_env_steps: float = 350e6  # v1.0: 350M (g1_walk_v4 did 350M in 7.06 h on 2xT4)
   # optimisation (rsl_rl-style; reference values used for legged robots)
   num_epochs: int = 5
   num_minibatches: int = 4
@@ -219,7 +225,10 @@ class PPOConfig:
   obs_clip: float = 10.0  # after normalisation
   # (v0.8) Penalise the policy mean beyond the action bounds [-1, 1]: the env clips
   # actions, so without this a mean that drifts past a bound gets no gradient back.
-  bound_coef: float = 0.5
+  # v1.0: 0.5 -> 1.0. g1_walk_v4 kept 17 % of its outputs at +-1, but that came mostly from
+  # its action std running away (fixed in v0.9.1); 2.0 drove saturation to 1 % in the CPU
+  # fine-tune while tracking fell, so v1.0 takes the middle value.
+  bound_coef: float = 1.0
   # (v0.8) Mirror loss: |mu(mirror(obs)) - mirror(mu(obs))|^2 (see symmetry.py). 0 = off.
   symmetry_coef: float = 1.0
   # domain-randomisation curriculum (level 0 = nominal robot, 1 = full ranges)
@@ -227,6 +236,13 @@ class PPOConfig:
   dr_level_step: float = 0.02  # added after each iteration that meets both criteria below
   curriculum_tracking: float = 0.6  # tracking_lin_vel reward (broad kernel) >= this fraction of its max
   curriculum_survival_steps: float = 800.0  # falls rarer than once per this many env steps
+  # warm start (v1.0): continue from an exported policy (e.g. g1_walk_v4's policy_final.npz)
+  critic_warmup_iters: int = 0  # iterations that train only the fresh critic (policy frozen)
+  warm_start_std: float = 0.35  # action std the warm-started policy explores with
+  # Learning rate a warm start begins with. Starting at learning_rate (1e-3) made the
+  # first policy update jump to KL 0.37 in the CPU verification run and undid ~15 %
+  # of the tracking; the adaptive rule then raises it if the KL allows.
+  warm_start_lr: float = 1e-4
   # bookkeeping
   seed: int = 0
   log_every: int = 10  # console line every N iterations (metrics file gets every iteration)

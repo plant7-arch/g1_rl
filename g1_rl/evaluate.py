@@ -188,6 +188,8 @@ def run_mjx_suite(policy, rt, scenarios=None, seconds: float = 20.0, quick: bool
         "foot_xy": d.site_xpos[feet_site][:, :2],
         "foot_h": env.foot_heights(d),
         "joint_margin": jnp.min(jnp.minimum(d.qpos[qadr] - env._lo, env._hi - d.qpos[qadr])),
+        # share of joints whose (deterministic) action sits at the +-1 limit this step
+        "sat": jnp.mean(jnp.abs(s.info["last_act"]) >= 0.999),
         "qpos": d.qpos,
     }
 
@@ -237,6 +239,7 @@ def analyse(sc: Scenario, r: dict, env: G1Env, settle_s: float = 2.0) -> dict:
     out["max_tilt_deg"] = float(np.degrees(np.arccos(np.clip(r["up_z"][win].min(), -1, 1))))
     out["peak_torque_ratio"] = float(r["torque_ratio"][win].max())
     out["min_joint_margin"] = float(r["joint_margin"][win].min())
+    out["saturation"] = float(r["sat"][win].mean())
   return out
 
 
@@ -257,6 +260,7 @@ def summarise(metrics: list) -> dict:
         "yaw_rate_err": _mean([m.get("yaw_rate_err") for m in grid]),
         "cost_of_transport": _mean([m.get("cost_of_transport") for m in grid]),
         "foot_slip": _mean([m.get("foot_slip") for m in grid]),
+        "saturation": _mean([m.get("saturation") for m in grid]),
         "worst": sorted(({"name": m["name"], "err": m.get("lin_vel_err"), "survived": m["survived"]}
                          for m in grid), key=lambda x: (x["survived"], -(x["err"] or 9)))[:5],
     }

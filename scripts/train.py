@@ -33,6 +33,10 @@ def main():
   p.add_argument("--run-name", default=None, help="default: <preset>_<date-time>")
   p.add_argument("--out-dir", default="outputs/runs")
   p.add_argument("--resume", default=None, help="run dir or ckpt .npz to continue from")
+  p.add_argument("--init-policy", default=None,
+                 help="warm start from an exported policy .npz (e.g. g1_walk_v4/policy_final.npz)")
+  p.add_argument("--critic-warmup", type=int, default=None, help="iterations training only the critic")
+  p.add_argument("--dr-level-start", type=float, default=None)
   p.add_argument("--max-hours", type=float, default=None,
                  help="stop cleanly (checkpoint saved) before this much time; Kaggle: 11.5")
   p.add_argument("--total-steps", type=float, default=None, help="override total env steps")
@@ -49,12 +53,14 @@ def main():
 
   cfg = PRESETS[args.preset]
   over = {k: v for k, v in [("total_env_steps", args.total_steps), ("num_envs", args.num_envs),
-                            ("seed", args.seed)] if v is not None}
+                            ("seed", args.seed), ("critic_warmup_iters", args.critic_warmup),
+                            ("dr_level_start", args.dr_level_start)] if v is not None}
   cfg = dataclasses.replace(cfg, **over)
   name = args.run_name or f"{args.preset}_{time.strftime('%Y%m%d_%H%M%S')}"
   video = args.video if args.video is not None else args.preset == "full"
   summary = train(cfg, os.path.join(args.out_dir, name), rt, resume=args.resume,
-                  max_hours=args.max_hours, video=video, stop_after=args.stop_after)
+                  max_hours=args.max_hours, video=video, stop_after=args.stop_after,
+                  init_policy=args.init_policy)
   sys.exit(0 if summary["stopped"] != "diverged" else 1)
 
 

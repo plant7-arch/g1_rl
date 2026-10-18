@@ -38,6 +38,15 @@ def test_layout(setup):
   assert env.frame_size == 100 and env.history == 5 and env.obs_size == 500
   assert env.priv_obs_size == 212
   assert env.priv_layout["obs"] == slice(0, 100)
+  names = list(env.robot.actuator_names)
+  assert env.action_scale[names.index("left_ankle_roll_joint")] == pytest.approx(0.5)
+  assert env.action_scale[names.index("left_elbow_joint")] == pytest.approx(0.25)
+  assert env.action_scale[names.index("left_knee_joint")] == pytest.approx(0.5)
+  body = {env.mj_model.body(i).name: i for i in range(env.mj_model.nbody)}
+  ig = env._ignore_pair
+  assert ig[body["left_wrist_yaw_link"], body["left_hip_roll_link"]]  # hand-hip: not penalised
+  assert not ig[body["left_knee_link"], body["right_knee_link"]]  # legs: penalised
+  assert not ig[body["torso_link"], body["left_wrist_yaw_link"]]
 
 
 def test_reset(setup):

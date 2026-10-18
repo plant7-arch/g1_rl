@@ -13,6 +13,8 @@ CHECKS = [
     ("Nominal: survives every grid command", lambda s, x: _get(s, "grid", "survival"), ">=", 0.98),
     ("Nominal: linear velocity error (m/s)", lambda s, x: _get(s, "grid", "lin_vel_err"), "<=", 0.20),
     ("Nominal: yaw-rate error (rad/s)", lambda s, x: _get(s, "grid", "yaw_rate_err"), "<=", 0.25),
+    ("Nominal: share of actions pinned at the +-1 limit", lambda s, x: _get(s, "grid", "saturation"),
+     "<=", 0.05),
     ("Training conditions: survival over the whole scenario", lambda s, x: _get(s, "training", "survival"),
      ">=", 0.90),
     ("Walking: recovers from 0.5 m/s pushes in all directions",
@@ -110,7 +112,8 @@ def _markdown(meta, chk, s, x) -> str:
     g = s["grid"]
     L += ["", "## Nominal robot, fixed commands (MJX)", "",
           f"survival {_fmt(g['survival'])} · linear velocity error {_fmt(g['lin_vel_err'])} m/s · "
-          f"yaw-rate error {_fmt(g['yaw_rate_err'])} rad/s · cost of transport {_fmt(g['cost_of_transport'])} · "
+          f"yaw-rate error {_fmt(g['yaw_rate_err'])} rad/s · actions at the limit {_fmt(g.get('saturation'))} · "
+          f"cost of transport {_fmt(g['cost_of_transport'])} · "
           f"stance-foot slip {_fmt(g['foot_slip'])} m/s", "", "Worst commands: " +
           ", ".join(f"{w['name']} ({'fell' if not w['survived'] else _fmt(w['err']) + ' m/s'})"
                     for w in g["worst"])]

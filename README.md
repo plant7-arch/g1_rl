@@ -84,7 +84,7 @@ Use `--platform cpu` on any script to force CPU.
 Each delivered package bumps `__version__` in `g1_rl/__init__.py`. On your
 computer, `update_from_zip.sh -m "..." g1_rl_x_y_z.zip` commits it as one commit tagged
 `v<version>` and pushes it. On Kaggle, the first notebook cell clones that tag
-(`GIT_REF = "v0.9.1"`) or `main`. Run outputs (`outputs/`, checkpoints) are
+(`GIT_REF = "v1.0.0"`) or `main`. Run outputs (`outputs/`, checkpoints) are
 git-ignored.
 
 ## Environment (Phase 1)
@@ -251,6 +251,35 @@ Not yet included: real uneven terrain (steps, rough ground). MJX heightfields ne
 analytic foot-contact code rewritten, so this stays for a later version; slopes are covered
 exactly by the gravity tilt. The evaluation suite gained slope, IMU-tilt and small-command
 groups with readiness checks.
+
+## Final version (v1.0): lessons from v1–v4
+
+g1_walk_v4 (v0.9.0) was tested on CPU MuJoCo against v3. It is far more robust:
+- standing push survival at 1.0 m/s rose from 33 % to 94 %
+- 9° slopes are survived walking and standing
+- self-contacts fell from 37 % to 0
+- it handles a 15 kg payload and kp ×0.7
+
+It lost the commands, though:
+- it turns at only ~35 % of the commanded yaw rate (v3: 99 %)
+- top speed is 0.77 m/s at a 1.0 m/s command (v3: 0.96)
+- 17 % of its actions sit at the ±1 limit (ankle roll 70–90 %, shoulder roll 54–85 %)
+
+What the tests showed, and what v1.0 does about it:
+
+| Test | Result | v1.0 |
+|---|---|---|
+| Score v3's and v4's trajectories under both reward sets | Both reward sets rate v3's behaviour ~20 % higher than v4's, so v4 did not find a better optimum. It got stuck because the σ 0.1 kernel gives almost no gradient at large errors, and the entropy bonus pushed its std from 0.4 to 0.8. | broad σ 0.25 kernels plus sharp σ 0.05 terms; entropy 0.002; std cap 1.0 (v0.9.1) |
+| Seven CPU fine-tunes of v4 (warm start, critic warm-up, lr 1e-4) | Training yaw tracking stayed flat at 0.18 in every run, and 100 iterations made speed and small-command tracking slightly worse under either bound setting. Starting at lr 1e-3 jumped to KL 0.37 on the first update. | **train from scratch**. The warm start (`--init-policy`, `--critic-warmup`) stays available, but there is no evidence that it repairs turning. |
+| Ankle-roll action scale 0.25 | Saturation 19 % → 7 %, but top speed −18 % | keep 0.5 (v3 had 2 % saturation at 0.5) |
+| Bound loss 2.0 vs 0.5 | Saturation 1 % vs 8 %; tracking fell in both | 1.0 |
+| Hand capsules vs hips/thighs | Penalised in v4's training model; makes it hold its arms spread at the limit. The full mesh model shows almost no such contact. | these pairs no longer count for `self_collision`; leg–leg contacts still do |
+
+The evaluation report adds a check that at most 5 % of actions are pinned at ±1.
+`pretrained/g1_walk_v4/` ships v4's policy as a fallback.
+
+Run: `notebooks/kaggle_overnight.ipynb` with `RUN_NAME = "g1_walk_final"`, `MAX_HOURS = 7.2`
+(350M steps take ~7.1 h; ~7.5 h in total including evaluation and export).
 
 ## Export (Phase 6)
 

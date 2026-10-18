@@ -59,8 +59,9 @@ def main():
 
   pi = export.OnnxPolicy(os.path.join(out, "policy.onnx"), providers=["CPUExecutionProvider"])
   r = MujocoRunner(SimConfig().eval_xml_path, pi).run((0.5, 0.0, 0.0), seconds=10.0)
+  num = lambda v: "n/a" if v is None else f"{v:.2f}"  # None when the robot fell (v1.0 fix)
   print(f"2. ONNX policy in the full mesh model, 10 s at 0.5 m/s: survived {r['survived']}, "
-        f"mean vx {r['vx_mean']:.2f} m/s, velocity error {r['lin_vel_err']:.2f} m/s")
+        f"mean vx {num(r['vx_mean'])} m/s, velocity error {num(r['lin_vel_err'])} m/s")
   ok &= bool(r["survived"])
   res = subprocess.run([sys.executable, os.path.join(out, "run_mujoco.py"), "--xml", SimConfig().eval_xml_path,
                         "--cmd", "0.5", "0", "0", "--seconds", "10"], capture_output=True, text=True)
