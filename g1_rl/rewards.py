@@ -88,6 +88,15 @@ def _tracking_lin_vel(i, c, cfg):
   return jnp.exp(-err / cfg.tracking_sigma)
 
 
+def _tracking_lin_vel_fine(i, c, cfg):
+  err = jnp.sum(jnp.square(i.command[:2] - i.lin_vel[:2]))
+  return jnp.exp(-err / cfg.tracking_fine_sigma)
+
+
+def _tracking_ang_vel_fine(i, c, cfg):
+  return jnp.exp(-jnp.square(i.command[2] - i.ang_vel[2]) / cfg.tracking_fine_sigma)
+
+
 def _tracking_ang_vel(i, c, cfg):
   return jnp.exp(-jnp.square(i.command[2] - i.ang_vel[2]) / cfg.tracking_ang_sigma)
 
@@ -196,6 +205,7 @@ def _termination(i, c, cfg):
 
 TERMS = {
     "tracking_lin_vel": _tracking_lin_vel, "tracking_ang_vel": _tracking_ang_vel,
+    "tracking_lin_vel_fine": _tracking_lin_vel_fine, "tracking_ang_vel_fine": _tracking_ang_vel_fine,
     "alive": _alive, "feet_phase": _feet_phase, "gait_contact": _gait_contact,
     "feet_air_time": _feet_air_time, "feet_slip": _feet_slip, "feet_flat": _feet_flat,
     "feet_distance": _feet_distance, "self_collision": _self_collision,

@@ -12,7 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 
 ACTIVATIONS = {"elu": jax.nn.elu, "silu": jax.nn.silu, "tanh": jnp.tanh, "relu": jax.nn.relu}
-LOG_STD_MIN, LOG_STD_MAX = np.log(0.02), np.log(2.0)
+LOG_STD_MIN, LOG_STD_MAX = np.log(0.02), np.log(1.0)  # v0.9.1: max 2.0 -> 1.0 (actions live in [-1, 1])
 _LOG_2PI = float(np.log(2 * np.pi))
 
 

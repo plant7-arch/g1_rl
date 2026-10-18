@@ -49,7 +49,8 @@ def terms_of(i, c, cfg=CFG):
 
 
 W = CFG.weights
-REWARDS = ("tracking_lin_vel", "tracking_ang_vel", "alive", "feet_phase", "gait_contact")
+REWARDS = ("tracking_lin_vel", "tracking_ang_vel", "tracking_lin_vel_fine", "tracking_ang_vel_fine", "alive",
+           "feet_phase", "gait_contact")
 
 
 def test_pose_weights_cover_every_joint_once(consts):
@@ -236,9 +237,12 @@ def test_self_collision_counts_contacts(consts):
 
 
 def test_tracking_kernel_punishes_ignoring_small_commands(consts):
-  """v0.9: standing still when asked for 0.15 m/s must cost a clear share of the
-  tracking reward (with the old sigma 0.25 it kept 91 %)."""
+  """Standing still when asked for 0.15 m/s must cost a clear share of the tracking
+  reward (with only the broad kernel it kept 91 %): the fine term (v0.9.1) keeps 64 %."""
   i = baseline(consts, (0.15, 0.0, 0.0))
   ignore = i._replace(lin_vel=jnp.zeros(3))
-  ratio = terms_of(ignore, consts)["tracking_lin_vel"] / terms_of(i, consts)["tracking_lin_vel"]
-  assert ratio < 0.85
+  ratio = terms_of(ignore, consts)["tracking_lin_vel_fine"] / terms_of(i, consts)["tracking_lin_vel_fine"]
+  assert ratio < 0.7
+  t_ok, t_ign = terms_of(i, consts), terms_of(ignore, consts)
+  lost = sum(t_ok[k] - t_ign[k] for k in ("tracking_lin_vel", "tracking_lin_vel_fine"))
+  assert lost > 0.2 * W["tracking_lin_vel_fine"] * DT

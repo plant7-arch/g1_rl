@@ -62,6 +62,10 @@ def _default_weights():
   return {
       # task
       "tracking_lin_vel": 1.5,  # exp(-|v_xy_cmd - v_xy|^2 / tracking_sigma), heading frame
+      # (v0.9.1) sharp kernels on top of the broad ones: the broad ones give a gradient from
+      # far away, these make small errors (and ignoring small commands) cost reward.
+      "tracking_lin_vel_fine": 0.5,  # exp(-|err|^2 / tracking_fine_sigma)
+      "tracking_ang_vel_fine": 0.5,
       "tracking_ang_vel": 1.0,  # (v0.7: was 0.75) exp(-(wz_cmd - wz)^2 / sigma)
       "alive": 0.25,
       # gait shaping (uses the gait clock the policy observes)
@@ -108,10 +112,12 @@ def _default_pose_weights():
 class RewardConfig:
   weights: dict = dataclasses.field(default_factory=_default_weights)
   pose_weights: dict = dataclasses.field(default_factory=_default_pose_weights)
-  # (v0.9: 0.25 -> 0.1) A tighter tracking kernel: with 0.25, standing still when asked for
-  # 0.15 m/s still earned 91 % of the tracking reward, so the policy ignored small commands.
-  tracking_sigma: float = 0.1
-  tracking_ang_sigma: float = 0.1
+  # Broad kernels (0.25, as up to v0.8). v0.9 tightened both to 0.1: the positive reward
+  # shrank so much that the entropy bonus won, the action std grew from 0.4 to 0.8 and
+  # g1_walk_v4 barely learned to turn. v0.9.1 restores 0.25 and adds sharp terms instead.
+  tracking_sigma: float = 0.25
+  tracking_ang_sigma: float = 0.25
+  tracking_fine_sigma: float = 0.05  # standing still when asked for 0.15 m/s keeps 64 %
   base_height_target: float = 0.74  # m, pelvis; the bent-knee pose stands at ~0.74-0.75
   swing_height: float = 0.08  # m, peak foot clearance commanded by the gait clock
   feet_phase_sigma: float = 0.005
@@ -190,7 +196,7 @@ class PPOConfig:
   # data per iteration = num_envs * unroll_length (8192 * 24 = 196,608 env steps)
   num_envs: int = 8192
   unroll_length: int = 24
-  total_env_steps: float = 350e6  # v0.9: 250M -> 350M (harder task: slopes, history); ~7 h on 2xT4
+  total_env_steps: float = 400e6  # v0.9.1: 400M (harder task: slopes, history); ~8 h on 2xT4
   # optimisation (rsl_rl-style; reference values used for legged robots)
   num_epochs: int = 5
   num_minibatches: int = 4
@@ -199,7 +205,7 @@ class PPOConfig:
   clip_eps: float = 0.2
   value_clip_eps: float = 0.2
   value_coef: float = 1.0
-  entropy_coef: float = 0.005
+  entropy_coef: float = 0.002  # v0.9.1: 0.005 -> 0.002 (std ran away in g1_walk_v4)
   max_grad_norm: float = 1.0
   learning_rate: float = 1e-3  # initial; adapted per minibatch to keep KL near desired_kl
   adaptive_lr: bool = True
@@ -219,7 +225,7 @@ class PPOConfig:
   # domain-randomisation curriculum (level 0 = nominal robot, 1 = full ranges)
   dr_level_start: float = 0.0
   dr_level_step: float = 0.02  # added after each iteration that meets both criteria below
-  curriculum_tracking: float = 0.45  # tracking_lin_vel reward >= this fraction of its max (sigma 0.1 since v0.9)
+  curriculum_tracking: float = 0.6  # tracking_lin_vel reward (broad kernel) >= this fraction of its max
   curriculum_survival_steps: float = 800.0  # falls rarer than once per this many env steps
   # bookkeeping
   seed: int = 0

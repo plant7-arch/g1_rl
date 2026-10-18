@@ -84,7 +84,7 @@ Use `--platform cpu` on any script to force CPU.
 Each delivered package bumps `__version__` in `g1_rl/__init__.py`. On your
 computer, `update_from_zip.sh -m "..." g1_rl_x_y_z.zip` commits it as one commit tagged
 `v<version>` and pushes it. On Kaggle, the first notebook cell clones that tag
-(`GIT_REF = "v0.9.0"`) or `main`. Run outputs (`outputs/`, checkpoints) are
+(`GIT_REF = "v0.9.1"`) or `main`. Run outputs (`outputs/`, checkpoints) are
 git-ignored.
 
 ## Environment (Phase 1)
@@ -109,8 +109,9 @@ Per step: `r = max(Σ wᵢ·termᵢ·dt, 0) + w_term·fell·dt` (dt = 0.02 s). W
 
 | Group | Term | Weight | What it measures |
 |---|---|---|---|
-| Task | tracking_lin_vel | 1.5 | exp(−‖v_xy,cmd − v_xy‖²/0.1), velocity in the heading frame (σ 0.25 before v0.9) |
-| | tracking_ang_vel | 1.0 | exp(−(ω_z,cmd − ω_z)²/0.1) (0.75 before v0.7; σ 0.25 before v0.9) |
+| Task | tracking_lin_vel | 1.5 | exp(−‖v_xy,cmd − v_xy‖²/0.25), velocity in the heading frame |
+| | tracking_ang_vel | 1.0 | exp(−(ω_z,cmd − ω_z)²/0.25) (0.75 before v0.7) |
+| | tracking_lin_vel_fine / tracking_ang_vel_fine | 0.5 / 0.5 | the same errors with σ 0.05: small errors and ignored small commands cost reward (v0.9.1) |
 | | alive | 0.25 | 1 every step |
 | Gait | feet_phase | 1.0 | swing-foot height follows the clock (peak 8 cm); both feet down when standing (*) |
 | | gait_contact | 0.5 | contact pattern matches the clock |
@@ -171,13 +172,13 @@ python scripts/plot_metrics.py outputs/runs/<run> --show-terms
 
 | | |
 |---|---|
-| Algorithm | PPO, asymmetric actor-critic (policy sees 100 obs, critic 205), GAE (γ 0.99, λ 0.95), clipped surrogate + clipped value loss, entropy 0.005, grad-norm 1.0 |
-| Batch | 8192 envs × 24 steps = 196,608 steps / iteration; 5 epochs × 4 minibatches; 1781 iterations = 350M steps (250M before v0.9) |
+| Algorithm | PPO, asymmetric actor-critic (policy sees 5 × 100 obs, critic 212), GAE (γ 0.99, λ 0.95), clipped surrogate + clipped value loss, entropy 0.002 (0.005 before v0.9.1), action std ≤ 1.0, grad-norm 1.0 |
+| Batch | 8192 envs × 24 steps = 196,608 steps / iteration; 5 epochs × 4 minibatches; 2035 iterations = 400M steps (250M before v0.9) |
 | Learning rate | Adam, 1e-3 initial, adapted every minibatch to keep KL ≈ 0.01 (rsl_rl rule) |
 | Networks | 512-256-128 ELU for both; learned state-independent action std (init 0.6) |
 | Normalisation | running mean/var of both observation vectors, clipped at ±10; the loss uses the statistics the rollout used, updated afterwards |
 | Multi-GPU | envs split across GPUs; minibatches drawn within each GPU's samples (no shuffling traffic); gradients all-reduced |
-| Curriculum | randomisation level (incl. slopes and pushes) starts at 0 and rises by 0.02 per iteration while velocity tracking ≥ 45 % of max (60 % before the v0.9 σ change) and falls are rarer than 1 per 800 steps |
+| Curriculum | randomisation level (incl. slopes and pushes) starts at 0 and rises by 0.02 per iteration while velocity tracking ≥ 60 % of max and falls are rarer than 1 per 800 steps |
 | Time-outs | 20 s time limits bootstrap from V(s) (not treated as failures) |
 | Bound loss (v0.8) | 0.5 · Σ relu(\|μ\| − 1)² : the env clips actions to [−1, 1], so without it a mean that drifts past a bound gets no gradient back and stays saturated (logged: `loss/bound`, `policy/saturated`) |
 | Mirror loss (v0.8) | 1.0 · ‖μ(M_o·o) − M_a·μ(o)‖²: the policy must act on the left-right mirrored observation with the mirrored action (`symmetry.py`; roll/yaw joints and lateral quantities change sign, left/right swap, the feet swap gait clocks). Gives symmetric gaits; logged as `loss/symmetry` |
@@ -235,9 +236,16 @@ A 2,450-episode CPU MuJoCo test of g1_walk_v3 found four main weak spots; v0.9 t
 | Finding in v3 | Change |
 |---|---|
 | No sense of its own velocity: walked off slopes and with a tilted IMU (0.35–0.45 m/s while told to stand) | 5-frame observation history; 60 % of episodes on 0–10° slopes; IMU tilt, gyro bias and encoder offsets randomised |
-| Ignored commands below ~0.2 m/s and ~0.3 rad/s | tracking σ 0.25 → 0.1, 20 % small commands, deadband 0.05 |
+| Ignored commands below ~0.2 m/s and ~0.3 rad/s | sharp tracking terms (σ 0.05) beside the broad ones, 20 % small commands, deadband 0.05 |
 | Legs collided when stepping sideways; weak against side pushes while standing | self_collision penalty, feet_distance −30, 20 % standing, pushes to 1.0 m/s |
 | Fell at kp ×0.7, payload 12 kg; 4-step latency | kp ×0.75–1.25, payload to 8 kg, latency up to 2 steps, friction 0.3–1.2 |
+
+**v0.9.1:** v0.9.0 replaced the broad tracking kernels with σ 0.1. The positive reward shrank
+so much that the entropy bonus won: the action std rose from 0.4 to 0.8, falls in training
+stayed at 50–60 % for 1,000 iterations, and g1_walk_v4 turned at only ~35 % of the commanded
+rate. v0.9.1 restores σ 0.25, adds the sharp terms, lowers the entropy bonus to 0.002 and
+caps the action std at 1.0. Everything else from v0.9.0 stays (v4 already handled 9° slopes
+and 1–2 m/s standing pushes).
 
 Not yet included: real uneven terrain (steps, rough ground). MJX heightfields need the
 analytic foot-contact code rewritten, so this stays for a later version; slopes are covered
